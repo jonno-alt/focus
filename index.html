@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Focus">
+<meta name="theme-color" content="#0f172a">
+<title>Focus</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+  :root {
+    --bg: #0f172a;
+    --card: #1e293b;
+    --card-hover: #334155;
+    --text: #f1f5f9;
+    --text-dim: #94a3b8;
+    --accent-morning: #f97316;
+    --accent-deep: #3b82f6;
+    --accent-midday: #22c55e;
+    --accent-evening: #a855f7;
+    --done: #22c55e;
+    --skip: #f59e0b;
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100dvh;
+    overflow-x: hidden;
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+
+  /* SETUP SCREEN */
+  #setup-screen {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100dvh;
+    padding: 2rem;
+    text-align: center;
+  }
+  #setup-screen h1 { font-size: 2rem; margin-bottom: 0.5rem; }
+  #setup-screen p { color: var(--text-dim); margin-bottom: 2rem; font-size: 1rem; }
+  #setup-screen input {
+    width: 100%; max-width: 400px; padding: 1rem;
+    border-radius: 12px; border: 2px solid #334155;
+    background: var(--card); color: var(--text);
+    font-size: 1rem; margin-bottom: 1rem;
+    outline: none;
+  }
+  #setup-screen input:focus { border-color: var(--accent-deep); }
+  #setup-screen button {
+    padding: 1rem 2.5rem; border-radius: 12px; border: none;
+    background: var(--accent-deep); color: white;
+    font-size: 1.1rem; font-weight: 600; cursor: pointer;
+  }
+  #setup-screen .error { color: #ef4444; font-size: 0.9rem; margin-top: 0.5rem; }
+
+  /* MAIN APP */
+  #app { display: none; min-height: 100dvh; flex-direction: column; }
+  #app.active { display: flex; }
+
+  /* BLOCK SELECTOR */
+  .block-bar {
+    display: flex; gap: 6px; padding: 12px 16px;
+    overflow-x: auto; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .block-bar::-webkit-scrollbar { display: none; }
+  .block-btn {
+    flex-shrink: 0; padding: 10px 18px; border-radius: 50px;
+    border: 2px solid #334155; background: transparent;
+    color: var(--text-dim); font-size: 0.9rem; font-weight: 600;
+    cursor: pointer; white-space: nowrap; transition: all 0.2s;
+  }
+  .block-btn.active { border-color: var(--current-accent); color: white; background: var(--current-accent); }
+
+  /* PROGRESS BAR */
+  .progress-wrap { padding: 0 16px; margin-bottom: 4px; }
+  .progress-bar { height: 4px; border-radius: 2px; background: #334155; overflow: hidden; }
+  .progress-fill { height: 100%; border-radius: 2px; transition: width 0.4s ease; }
+  .progress-label { font-size: 0.8rem; color: var(--text-dim); margin-top: 4px; text-align: right; }
+
+  /* FOCUS CARD */
+  .focus-area {
+    flex: 1; display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    padding: 2rem 1.5rem; text-align: center;
+  }
+  .task-number { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 8px; letter-spacing: 0.05em; text-transform: uppercase; }
+  .task-name { font-size: 2rem; font-weight: 700; line-height: 1.2; margin-bottom: 12px; }
+  .task-duration { font-size: 1rem; color: var(--text-dim); margin-bottom: 2rem; }
+
+  /* TIMER */
+  .timer {
+    font-size: 3.5rem; font-weight: 300; font-variant-numeric: tabular-nums;
+    letter-spacing: 0.02em; margin-bottom: 2rem; min-height: 4.5rem;
+  }
+  .timer.running { color: var(--current-accent); }
+
+  /* ACTION BUTTONS */
+  .actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; padding: 0 1rem; }
+  .act-btn {
+    padding: 14px 28px; border-radius: 14px; border: none;
+    font-size: 1rem; font-weight: 600; cursor: pointer;
+    transition: transform 0.1s, opacity 0.2s;
+    min-width: 100px;
+  }
+  .act-btn:active { transform: scale(0.95); }
+  .btn-start { background: var(--current-accent); color: white; }
+  .btn-done { background: var(--done); color: white; }
+  .btn-skip { background: var(--skip); color: white; }
+  .btn-nav { background: var(--card); color: var(--text-dim); }
+
+  /* TASK LIST VIEW */
+  .list-toggle {
+    padding: 12px; text-align: center; color: var(--text-dim);
+    font-size: 0.85rem; cursor: pointer;
+  }
+  .list-toggle:hover { color: var(--text); }
+
+  #task-list {
+    display: none; padding: 0 16px 2rem;
+  }
+  #task-list.open { display: block; }
+
+  .task-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 14px 16px; margin-bottom: 6px;
+    border-radius: 12px; background: var(--card);
+    cursor: pointer; transition: background 0.15s;
+  }
+  .task-row:active { background: var(--card-hover); }
+  .task-row.done-row { opacity: 0.5; }
+  .task-row.skipped-row { opacity: 0.4; }
+  .task-row.current-row { border-left: 3px solid var(--current-accent); }
+
+  .row-status {
+    width: 28px; height: 28px; border-radius: 50%;
+    border: 2px solid #475569; display: flex;
+    align-items: center; justify-content: center;
+    font-size: 0.8rem; flex-shrink: 0;
+  }
+  .row-status.st-done { background: var(--done); border-color: var(--done); }
+  .row-status.st-skip { background: var(--skip); border-color: var(--skip); }
+  .row-status.st-progress { border-color: var(--current-accent); }
+  .row-name { flex: 1; font-size: 0.95rem; }
+  .row-dur { color: var(--text-dim); font-size: 0.85rem; flex-shrink: 0; }
+
+  /* ALL DONE */
+  .all-done { text-align: center; padding: 3rem 2rem; }
+  .all-done h2 { font-size: 2rem; margin-bottom: 0.5rem; }
+  .all-done p { color: var(--text-dim); font-size: 1rem; }
+
+  /* SYNC BUTTON */
+  .sync-btn {
+    position: fixed; top: calc(var(--safe-top) + 12px); right: 16px;
+    background: var(--card); border: none; color: var(--text-dim);
+    width: 40px; height: 40px; border-radius: 50%;
+    font-size: 1.2rem; cursor: pointer; z-index: 10;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .sync-btn.syncing { animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* LOADING */
+  .loading {
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100dvh; font-size: 1.2rem; color: var(--text-dim);
+  }
+  .dot-pulse::after {
+    content: ''; animation: dots 1.5s steps(4) infinite;
+  }
+  @keyframes dots {
+    0% { content: ''; }
+    25% { content: '.'; }
+    50% { content: '..'; }
+    75% { content: '...'; }
+  }
+</style>
+</head>
+<body>
+
+<!-- SETUP: Enter API Key -->
+<div id="setup-screen">
+  <h1>Focus</h1>
+  <p>Connect to your Airtable to get started.<br>You only need to do this once.</p>
+  <input type="text" id="api-key-input" placeholder="Paste your Airtable Personal Access Token" autocomplete="off" autocorrect="off" autocapitalize="off">
+  <button onclick="saveApiKey()">Connect</button>
+  <div class="error" id="setup-error"></div>
+  <p style="margin-top:2rem;font-size:0.8rem;">Go to airtable.com/create/tokens<br>Create a token with data.records:read and data.records:write<br>on your Consult Clarity CRM base.</p>
+</div>
+
+<!-- LOADING -->
+<div id="loading-screen" style="display:none" class="loading">
+  <span>Loading tasks<span class="dot-pulse"></span></span>
+</div>
+
+<!-- MAIN APP -->
+<div id="app">
+  <button class="sync-btn" onclick="syncTasks()" title="Refresh">&#x21bb;</button>
+
+  <div class="block-bar" id="block-bar"></div>
+
+  <div class="progress-wrap">
+    <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+    <div class="progress-label" id="progress-label"></div>
+  </div>
+
+  <div class="focus-area" id="focus-area"></div>
+
+  <div class="list-toggle" id="list-toggle" onclick="toggleList()">View all tasks &#9662;</div>
+  <div id="task-list"></div>
+</div>
+
+<script>
+// ── CONFIG ──
+const BASE_ID = 'appBW8dZCtGw0XC0Y';
+const TABLE_ID = 'tblaeaE0zyBOZvqSK';
+const FIELDS = {
+  name: 'fldaOCNPi491sCDm2',
+  block: 'fld6NTGxijFHvOhoZ',
+  type: 'fldKY4qLcuDmSbSCj',
+  order: 'fldz20kAw2OoxeW7r',
+  status: 'fldRqAYs1gAkEUVeF',
+  duration: 'fldpZweCkBX4KavgS',
+  date: 'fldBda6s4ZkPcKGj6',
+  lastCompleted: 'flduSIM7vUjJxSlTv',
+  notes: 'fldZaGTO1x8hZL894'
+};
+
+const BLOCKS = [
+  { name: 'Morning', color: '#f97316', icon: '☀️', time: '6:00–8:30am' },
+  { name: 'Deep Work', color: '#3b82f6', icon: '💼', time: '8:30am–12pm' },
+  { name: 'Midday', color: '#22c55e', icon: '🌤', time: '12–4pm' },
+  { name: 'Evening', color: '#a855f7', icon: '🌙', time: '4–8pm' }
+];
+
+let apiKey = '';
+let allTasks = [];
+let currentBlock = 'Morning';
+let currentIndex = 0;
+let timerInterval = null;
+let timerSeconds = 0;
+let timerRunning = false;
+
+// ── STORAGE (in-memory + try to persist key) ──
+function getStoredKey() {
+  try { return window.localStorage?.getItem('focus_airtable_key') || ''; } catch(e) { return ''; }
+}
+function storeKey(key) {
+  try { window.localStorage?.setItem('focus_airtable_key', key); } catch(e) {}
+}
+
+// ── INIT ──
+function init() {
+  // Check URL hash for token (persists in bookmarks/home screen)
+  const hash = window.location.hash.slice(1);
+  const params = new URLSearchParams(hash);
+  apiKey = params.get('token') || getStoredKey() || '';
+
+  if (apiKey) {
+    document.getElementById('setup-screen').style.display = 'none';
+    showLoading();
+    syncTasks();
+  } else {
+    document.getElementById('setup-screen').style.display = 'flex';
+  }
+}
+
+function saveApiKey() {
+  const key = document.getElementById('api-key-input').value.trim();
+  if (!key || !key.startsWith('pat')) {
+    document.getElementById('setup-error').textContent = 'Please enter a valid Personal Access Token (starts with "pat")';
+    return;
+  }
+  apiKey = key;
+  storeKey(key);
+  // Save token in URL hash so it persists in bookmarks/home screen
+  window.location.hash = 'token=' + encodeURIComponent(key);
+  document.getElementById('setup-screen').style.display = 'none';
+  showLoading();
+  syncTasks();
+}
+
+function showLoading() {
+  document.getElementById('loading-screen').style.display = 'flex';
+}
+
+// ── AIRTABLE API ──
+async function airtableFetch(endpoint, options = {}) {
+  const url = `https://api.airtable.com/v0/${BASE_ID}/${TABLE_ID}${endpoint}`;
+  const res = await fetch(url, {
+    ...options,
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    }
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.error?.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
+async function syncTasks() {
+  const syncBtn = document.querySelector('.sync-btn');
+  if (syncBtn) syncBtn.classList.add('syncing');
+
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    let records = [];
+    let offset = null;
+
+    // Fetch all records (paginated)
+    do {
+      const params = new URLSearchParams();
+      params.set('returnFieldsByFieldId', 'true');
+      if (offset) params.set('offset', offset);
+      const data = await airtableFetch(`?${params.toString()}`);
+      records = records.concat(data.records);
+      offset = data.offset;
+    } while (offset);
+
+    // Process tasks
+    allTasks = records
+      .map(r => ({
+        id: r.id,
+        name: r.fields[FIELDS.name] || '',
+        block: extractSelect(r.fields[FIELDS.block]),
+        type: extractSelect(r.fields[FIELDS.type]),
+        order: r.fields[FIELDS.order] || 99,
+        status: extractSelect(r.fields[FIELDS.status]),
+        duration: r.fields[FIELDS.duration] || 0,
+        date: r.fields[FIELDS.date] || null,
+        lastCompleted: r.fields[FIELDS.lastCompleted] || null,
+        notes: r.fields[FIELDS.notes] || ''
+      }))
+      .filter(t => {
+        // Show recurring tasks that haven't been completed today
+        if (t.type === 'Recurring') {
+          if (t.lastCompleted === today && (t.status === 'Done' || t.status === 'Skipped')) {
+            // Already done today — still show but mark as done
+            return true;
+          }
+          return true;
+        }
+        // One-offs: only show if date is today or no date set
+        if (t.type === 'One-off') {
+          return !t.date || t.date === today;
+        }
+        return true;
+      })
+      .sort((a, b) => a.order - b.order);
+
+    // Reset recurring tasks if last completed was before today
+    for (const t of allTasks) {
+      if (t.type === 'Recurring' && t.lastCompleted !== today) {
+        if (t.status === 'Done' || t.status === 'Skipped') {
+          t.status = 'To Do';
+          // Update in Airtable
+          updateTaskStatus(t.id, 'To Do', false);
+        }
+      }
+    }
+
+    document.getElementById('loading-screen').style.display = 'none';
+    document.getElementById('app').classList.add('active');
+
+    renderBlockBar();
+    goToFirstIncomplete();
+    render();
+  } catch (e) {
+    console.error(e);
+    document.getElementById('loading-screen').style.display = 'none';
+    document.getElementById('setup-screen').style.display = 'flex';
+    document.getElementById('setup-error').textContent = 'Connection failed: ' + e.message;
+    apiKey = '';
+    storeKey('');
+  } finally {
+    if (syncBtn) setTimeout(() => syncBtn.classList.remove('syncing'), 500);
+  }
+}
+
+function extractSelect(val) {
+  if (!val) return '';
+  if (typeof val === 'string') return val;
+  if (val.name) return val.name;
+  return '';
+}
+
+async function updateTaskStatus(recordId, status, setDate = true) {
+  const today = new Date().toISOString().split('T')[0];
+  const fields = {};
+  fields[FIELDS.status] = status;
+  if (setDate && (status === 'Done' || status === 'Skipped')) {
+    fields[FIELDS.lastCompleted] = today;
+  }
+  try {
+    await airtableFetch('', {
+      method: 'PATCH',
+      body: JSON.stringify({ records: [{ id: recordId, fields }] })
+    });
+  } catch (e) {
+    console.error('Update failed:', e);
+  }
+}
+
+// ── BLOCK BAR ──
+function renderBlockBar() {
+  const bar = document.getElementById('block-bar');
+  bar.innerHTML = BLOCKS.map(b => {
+    const count = getBlockTasks(b.name).length;
+    const done = getBlockTasks(b.name).filter(t => t.status === 'Done' || t.status === 'Skipped').length;
+    return `<button class="block-btn ${currentBlock === b.name ? 'active' : ''}"
+      onclick="switchBlock('${b.name}')"
+      style="${currentBlock === b.name ? `--current-accent:${b.color}` : ''}">
+      ${b.icon} ${b.name} <span style="opacity:0.6;font-size:0.8rem">${done}/${count}</span>
+    </button>`;
+  }).join('');
+}
+
+function getBlockTasks(block) {
+  return allTasks.filter(t => t.block === block);
+}
+
+function switchBlock(block) {
+  currentBlock = block;
+  currentIndex = 0;
+  stopTimer();
+  goToFirstIncomplete();
+  renderBlockBar();
+  render();
+}
+
+function getCurrentAccent() {
+  const b = BLOCKS.find(b => b.name === currentBlock);
+  return b ? b.color : '#3b82f6';
+}
+
+function goToFirstIncomplete() {
+  const tasks = getBlockTasks(currentBlock);
+  const idx = tasks.findIndex(t => t.status === 'To Do' || t.status === 'In Progress');
+  currentIndex = idx >= 0 ? idx : tasks.length; // past end = all done
+}
+
+// ── RENDER ──
+function render() {
+  document.documentElement.style.setProperty('--current-accent', getCurrentAccent());
+  const tasks = getBlockTasks(currentBlock);
+  const doneCount = tasks.filter(t => t.status === 'Done' || t.status === 'Skipped').length;
+
+  // Progress
+  const pct = tasks.length ? Math.round((doneCount / tasks.length) * 100) : 0;
+  document.getElementById('progress-fill').style.width = pct + '%';
+  document.getElementById('progress-fill').style.background = getCurrentAccent();
+  document.getElementById('progress-label').textContent = `${doneCount} of ${tasks.length} done`;
+
+  const area = document.getElementById('focus-area');
+
+  if (currentIndex >= tasks.length) {
+    // All done!
+    area.innerHTML = `
+      <div class="all-done">
+        <h2>All done! ✓</h2>
+        <p>${currentBlock} block complete</p>
+        <p style="margin-top:1rem;font-size:0.9rem">Switch to another block above, or add tasks in Airtable and tap sync.</p>
+      </div>`;
+  } else {
+    const task = tasks[currentIndex];
+    const isRunning = timerRunning && task.status === 'In Progress';
+
+    area.innerHTML = `
+      <div class="task-number">Task ${currentIndex + 1} of ${tasks.length}</div>
+      <div class="task-name">${task.name}</div>
+      <div class="task-duration">${task.duration ? task.duration + ' min' : ''}</div>
+      <div class="timer ${isRunning ? 'running' : ''}" id="timer-display">${formatTime(timerSeconds)}</div>
+      <div class="actions">
+        ${task.status === 'To Do' ? `
+          <button class="act-btn btn-start" onclick="startTask()">Start</button>
+          <button class="act-btn btn-skip" onclick="skipTask()">Skip</button>
+        ` : task.status === 'In Progress' ? `
+          <button class="act-btn btn-done" onclick="completeTask()">Done ✓</button>
+          <button class="act-btn btn-skip" onclick="skipTask()">Skip</button>
+        ` : `
+          <button class="act-btn btn-nav" onclick="nextTask()">Next →</button>
+        `}
+        ${currentIndex > 0 ? `<button class="act-btn btn-nav" onclick="prevTask()">← Back</button>` : ''}
+      </div>
+    `;
+  }
+
+  renderList(tasks);
+}
+
+// ── TASK ACTIONS ──
+function startTask() {
+  const tasks = getBlockTasks(currentBlock);
+  const task = tasks[currentIndex];
+  if (!task) return;
+
+  task.status = 'In Progress';
+  updateTaskStatus(task.id, 'In Progress', false);
+  timerSeconds = 0;
+  timerRunning = true;
+  timerInterval = setInterval(() => {
+    timerSeconds++;
+    const disp = document.getElementById('timer-display');
+    if (disp) disp.textContent = formatTime(timerSeconds);
+  }, 1000);
+  render();
+}
+
+function completeTask() {
+  const tasks = getBlockTasks(currentBlock);
+  const task = tasks[currentIndex];
+  if (!task) return;
+
+  task.status = 'Done';
+  task.lastCompleted = new Date().toISOString().split('T')[0];
+  updateTaskStatus(task.id, 'Done');
+  stopTimer();
+
+  // Auto advance
+  setTimeout(() => {
+    currentIndex++;
+    goToNextIncomplete();
+    renderBlockBar();
+    render();
+  }, 300);
+}
+
+function skipTask() {
+  const tasks = getBlockTasks(currentBlock);
+  const task = tasks[currentIndex];
+  if (!task) return;
+
+  task.status = 'Skipped';
+  task.lastCompleted = new Date().toISOString().split('T')[0];
+  updateTaskStatus(task.id, 'Skipped');
+  stopTimer();
+
+  setTimeout(() => {
+    currentIndex++;
+    goToNextIncomplete();
+    renderBlockBar();
+    render();
+  }, 300);
+}
+
+function goToNextIncomplete() {
+  const tasks = getBlockTasks(currentBlock);
+  // Already past end
+  if (currentIndex >= tasks.length) return;
+  // If current is incomplete, stay
+  if (tasks[currentIndex] && (tasks[currentIndex].status === 'To Do' || tasks[currentIndex].status === 'In Progress')) return;
+  // Find next incomplete
+  for (let i = currentIndex; i < tasks.length; i++) {
+    if (tasks[i].status === 'To Do' || tasks[i].status === 'In Progress') {
+      currentIndex = i;
+      return;
+    }
+  }
+  currentIndex = tasks.length; // all done
+}
+
+function nextTask() {
+  const tasks = getBlockTasks(currentBlock);
+  if (currentIndex < tasks.length - 1) {
+    currentIndex++;
+    stopTimer();
+    render();
+  } else {
+    currentIndex = tasks.length;
+    render();
+  }
+}
+
+function prevTask() {
+  if (currentIndex > 0) {
+    currentIndex--;
+    stopTimer();
+    render();
+  }
+}
+
+function jumpToTask(idx) {
+  currentIndex = idx;
+  stopTimer();
+  render();
+  // Scroll up to focus area
+  document.getElementById('focus-area').scrollIntoView({ behavior: 'smooth' });
+}
+
+// ── TIMER ──
+function stopTimer() {
+  clearInterval(timerInterval);
+  timerRunning = false;
+  timerSeconds = 0;
+}
+
+function formatTime(s) {
+  const m = Math.floor(s / 60);
+  const sec = s % 60;
+  return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+// ── TASK LIST ──
+function toggleList() {
+  const list = document.getElementById('task-list');
+  const toggle = document.getElementById('list-toggle');
+  list.classList.toggle('open');
+  toggle.innerHTML = list.classList.contains('open') ? 'Hide task list &#9652;' : 'View all tasks &#9662;';
+}
+
+function renderList(tasks) {
+  const list = document.getElementById('task-list');
+  list.innerHTML = tasks.map((t, i) => {
+    const stClass = t.status === 'Done' ? 'st-done' : t.status === 'Skipped' ? 'st-skip' : t.status === 'In Progress' ? 'st-progress' : '';
+    const rowClass = t.status === 'Done' ? 'done-row' : t.status === 'Skipped' ? 'skipped-row' : '';
+    const currentClass = i === currentIndex ? 'current-row' : '';
+    const icon = t.status === 'Done' ? '✓' : t.status === 'Skipped' ? '–' : t.status === 'In Progress' ? '►' : '';
+    return `<div class="task-row ${rowClass} ${currentClass}" onclick="jumpToTask(${i})">
+      <div class="row-status ${stClass}">${icon}</div>
+      <div class="row-name">${t.name}</div>
+      <div class="row-dur">${t.duration ? t.duration + 'm' : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── BOOT ──
+init();
+</script>
+</body>
+</html>
