@@ -2725,3 +2725,35 @@ Total: 63/63 posts scheduled across 9 platforms (Pinterest skipped)
 
 ### GitHub
 All images and videos uploaded to `carousel-images/7-questions-movement-2026-04-27/`
+
+## Topic 4: Building Trust in Remote Leadership Teams
+**Date:** 2026-04-27
+**Category:** Blog
+**Slug:** remote-trust-2026-04-27
+
+### Carousels Built
+| Carousel | Slides | Sizes |
+|----------|--------|-------|
+| trust-killers | 7 | square, portrait, vertical |
+| build-trust | 8 | square, portrait, vertical |
+| remote-rituals | 8 | square, portrait, vertical |
+
+### Videos
+- trust-killers-video.mp4 (28s)
+- build-trust-video.mp4 (32s)
+- remote-rituals-video.mp4 (32s)
+
+### Buffer Scheduling (27 posts total)
+- **Instagram:** 3 posts (square, all slides) — addToQueue
+- **Facebook:** 3 posts (portrait, all slides) — addToQueue
+- **LinkedIn Personal:** 3 posts (portrait, all slides) — addToQueue
+- **LinkedIn Page:** 3 posts (portrait, all slides) — addToQueue
+- **Threads:** 3 posts (square, all slides) — addToQueue
+- **X/Twitter:** 3 posts (square, 4 images each) — addToQueue
+- **Bluesky:** 3 posts (square, 4 images each) — addToQueue
+- **Google Business:** 3 posts (1 square image each) — addToQueue
+- **TikTok:** 3 videos — customScheduled May 7-9
+- **YouTube:** 3 videos — customScheduled May 11-13
+
+### GitHub
+All images and videos uploaded to `carousel-images/remote-trust-2026-04-27/`
