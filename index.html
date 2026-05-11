@@ -21,6 +21,8 @@
     --accent-deep: #3b82f6;
     --accent-midday: #22c55e;
     --accent-evening: #a855f7;
+    --accent-maintenance: #64748b;
+    --accent-outsourced: #94a3b8;
     --done: #22c55e;
     --skip: #f59e0b;
     --safe-top: env(safe-area-inset-top, 0px);
@@ -155,6 +157,14 @@
   .row-name { flex: 1; font-size: 0.95rem; }
   .row-dur { color: var(--text-dim); font-size: 0.85rem; flex-shrink: 0; }
 
+  .cat-header {
+    color: var(--text-dim); font-size: 0.75rem;
+    text-transform: uppercase; letter-spacing: 0.08em;
+    font-weight: 600; padding: 12px 4px 6px;
+    margin-top: 4px;
+  }
+  .cat-header:first-child { margin-top: 0; padding-top: 0; }
+
   /* ALL DONE */
   .all-done { text-align: center; padding: 3rem 2rem; }
   .all-done h2 { font-size: 2rem; margin-bottom: 0.5rem; }
@@ -234,14 +244,18 @@ const FIELDS = {
   duration: 'fldpZweCkBX4KavgS',
   date: 'fldBda6s4ZkPcKGj6',
   lastCompleted: 'flduSIM7vUjJxSlTv',
-  notes: 'fldZaGTO1x8hZL894'
+  notes: 'fldZaGTO1x8hZL894',
+  cadence: 'fldD9bNoB2IbLNGvG',
+  subCategory: 'fldY1M1franWJQ0Gt'
 };
 
 const BLOCKS = [
   { name: 'Morning', color: '#f97316', icon: '☀️', time: '6:00–8:30am' },
   { name: 'Deep Work', color: '#3b82f6', icon: '💼', time: '8:30am–12pm' },
   { name: 'Midday', color: '#22c55e', icon: '🌤', time: '12–4pm' },
-  { name: 'Evening', color: '#a855f7', icon: '🌙', time: '4–8pm' }
+  { name: 'Evening', color: '#a855f7', icon: '🌙', time: '4–8pm' },
+  { name: 'Maintenance', color: '#64748b', icon: '🧹', time: 'As needed' },
+  { name: 'Outsourced', color: '#94a3b8', icon: '💸', time: 'Book it' }
 ];
 
 let apiKey = '';
@@ -344,11 +358,18 @@ async function syncTasks() {
         duration: r.fields[FIELDS.duration] || 0,
         date: r.fields[FIELDS.date] || null,
         lastCompleted: r.fields[FIELDS.lastCompleted] || null,
-        notes: r.fields[FIELDS.notes] || ''
+        notes: r.fields[FIELDS.notes] || '',
+        cadence: r.fields[FIELDS.cadence] || 1,
+        subCategory: extractSelect(r.fields[FIELDS.subCategory])
       }))
       .filter(t => {
         // Show recurring tasks that haven't been completed today
         if (t.type === 'Recurring') {
+          // Hide Maintenance/Outsourced tasks unless they are due (status === 'To Do' or 'In Progress')
+          if (t.block === 'Maintenance' || t.block === 'Outsourced') {
+            if (t.status === 'Done' || t.status === 'Skipped') return false;
+            return true;
+          }
           if (t.lastCompleted === today && (t.status === 'Done' || t.status === 'Skipped')) {
             // Already done today — still show but mark as done
             return true;
@@ -363,10 +384,11 @@ async function syncTasks() {
       })
       .sort((a, b) => a.order - b.order);
 
-    // Reset recurring tasks if last completed was before today
+    // Reset recurring tasks based on cadence
     for (const t of allTasks) {
-      if (t.type === 'Recurring' && t.lastCompleted !== today) {
-        if (t.status === 'Done' || t.status === 'Skipped') {
+      if (t.type === 'Recurring' && t.lastCompleted && (t.status === 'Done' || t.status === 'Skipped')) {
+        const daysSince = Math.floor((new Date(today) - new Date(t.lastCompleted)) / 86400000);
+        if (daysSince >= (t.cadence || 1)) {
           t.status = 'To Do';
           // Update in Airtable
           updateTaskStatus(t.id, 'To Do', false);
@@ -625,17 +647,43 @@ function toggleList() {
 
 function renderList(tasks) {
   const list = document.getElementById('task-list');
-  list.innerHTML = tasks.map((t, i) => {
-    const stClass = t.status === 'Done' ? 'st-done' : t.status === 'Skipped' ? 'st-skip' : t.status === 'In Progress' ? 'st-progress' : '';
-    const rowClass = t.status === 'Done' ? 'done-row' : t.status === 'Skipped' ? 'skipped-row' : '';
-    const currentClass = i === currentIndex ? 'current-row' : '';
-    const icon = t.status === 'Done' ? '✓' : t.status === 'Skipped' ? '–' : t.status === 'In Progress' ? '►' : '';
-    return `<div class="task-row ${rowClass} ${currentClass}" onclick="jumpToTask(${i})">
-      <div class="row-status ${stClass}">${icon}</div>
-      <div class="row-name">${t.name}</div>
-      <div class="row-dur">${t.duration ? t.duration + 'm' : ''}</div>
-    </div>`;
+  const groupByCategory = (currentBlock === 'Maintenance' || currentBlock === 'Outsourced');
+
+  if (!groupByCategory) {
+    list.innerHTML = tasks.map((t, i) => renderTaskRow(t, i)).join('');
+    return;
+  }
+
+  // Group by Sub-Category for Maintenance / Outsourced blocks
+  const groups = {};
+  tasks.forEach((t, i) => {
+    const cat = t.subCategory || 'Other';
+    if (!groups[cat]) groups[cat] = [];
+    groups[cat].push({ task: t, index: i });
+  });
+
+  const order = ['Indoor', 'Outdoor', 'Kids', 'Health & Safety', 'Laundry', 'Other'];
+  const sortedCats = Object.keys(groups).sort((a, b) => {
+    const ai = order.indexOf(a); const bi = order.indexOf(b);
+    return (ai === -1 ? 99 : ai) - (bi === -1 ? 99 : bi);
+  });
+
+  list.innerHTML = sortedCats.map(cat => {
+    const rows = groups[cat].map(({ task, index }) => renderTaskRow(task, index)).join('');
+    return `<div class="cat-header">${cat}</div>${rows}`;
   }).join('');
+}
+
+function renderTaskRow(t, i) {
+  const stClass = t.status === 'Done' ? 'st-done' : t.status === 'Skipped' ? 'st-skip' : t.status === 'In Progress' ? 'st-progress' : '';
+  const rowClass = t.status === 'Done' ? 'done-row' : t.status === 'Skipped' ? 'skipped-row' : '';
+  const currentClass = i === currentIndex ? 'current-row' : '';
+  const icon = t.status === 'Done' ? '✓' : t.status === 'Skipped' ? '–' : t.status === 'In Progress' ? '►' : '';
+  return `<div class="task-row ${rowClass} ${currentClass}" onclick="jumpToTask(${i})">
+    <div class="row-status ${stClass}">${icon}</div>
+    <div class="row-name">${t.name}</div>
+    <div class="row-dur">${t.duration ? t.duration + 'm' : ''}</div>
+  </div>`;
 }
 
 // ── BOOT ──
