@@ -101,14 +101,45 @@
   }
   .task-number { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 8px; letter-spacing: 0.05em; text-transform: uppercase; }
   .task-name { font-size: 2rem; font-weight: 700; line-height: 1.2; margin-bottom: 12px; }
-  .task-duration { font-size: 1rem; color: var(--text-dim); margin-bottom: 2rem; }
+  .task-duration { font-size: 1rem; color: var(--text-dim); margin-bottom: 1.5rem; }
 
-  /* TIMER */
-  .timer {
-    font-size: 3.5rem; font-weight: 300; font-variant-numeric: tabular-nums;
-    letter-spacing: 0.02em; margin-bottom: 2rem; min-height: 4.5rem;
+  /* TIMER - circular ring */
+  .timer-wrap {
+    position: relative; width: 180px; height: 180px;
+    margin: 0 auto 1.5rem auto;
   }
-  .timer.running { color: var(--current-accent); }
+  .timer-ring { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .timer-ring-bg {
+    fill: none; stroke: var(--card-hover); stroke-width: 10;
+  }
+  .timer-ring-fg {
+    fill: none; stroke: var(--current-accent); stroke-width: 10;
+    stroke-linecap: round;
+    transition: stroke-dashoffset 0.5s linear, stroke 0.3s;
+  }
+  .timer-ring-fg.overrun { stroke: #ef4444; }
+  .timer-center {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+  }
+  .timer-mmss {
+    font-size: 2.4rem; font-weight: 300;
+    font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+  }
+  .timer-mmss.overrun { color: #ef4444; }
+  .timer-label {
+    font-size: 0.7rem; color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.08em; margin-top: 4px;
+  }
+  .learn-toast {
+    position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+    background: var(--card); color: var(--text); padding: 8px 16px;
+    border-radius: 20px; font-size: 0.85rem; opacity: 0;
+    transition: opacity 0.3s; pointer-events: none; z-index: 999;
+    border: 1px solid var(--card-hover);
+  }
+  .learn-toast.show { opacity: 1; }
 
   /* ACTION BUTTONS */
   .actions { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; padding: 0 1rem; }
@@ -248,7 +279,8 @@ const FIELDS = {
   lastCompleted: 'flduSIM7vUjJxSlTv',
   notes: 'fldZaGTO1x8hZL894',
   cadence: 'fldD9bNoB2IbLNGvG',
-  subCategory: 'fldY1M1franWJQ0Gt'
+  subCategory: 'fldY1M1franWJQ0Gt',
+  timeHistory: null  // set to field ID once Cowork creates the 'Time History' long text field
 };
 
 const BLOCKS = [
@@ -262,6 +294,36 @@ const BLOCKS = [
   { name: 'Loving Liz', color: '#ec4899', icon: '💗', time: 'Anytime' }
 ];
 
+// Keyword-based duration estimator (minutes). Used when a task has no Duration set.
+const DURATION_KEYWORDS = {
+  wipe: 3, brush: 2, sweep: 5, dust: 5, throw: 2, fill: 2, put: 2, clear: 3,
+  load: 5, empty: 5, dishes: 10, vacuum: 10, mop: 15, hand: 10,
+  clean: 10, scrub: 15, wash: 10, deep: 30, change: 5, sheets: 10,
+  dress: 3, nappy: 3, breakfast: 10, books: 15, oats: 5, kids: 5,
+  hose: 10, water: 5, leaf: 10, plants: 5, sweep: 5,
+  shower: 10, coffee: 5, bed: 3, dex: 1, take: 1,
+  email: 5, linkedin: 15, message: 2, blog: 60, post: 10, draft: 20,
+  publish: 30, ads: 20, connections: 30, requests: 20,
+  prep: 5, set: 2, serve: 3, help: 5, books: 15, reset: 5,
+  laptop: 2, table: 5, check: 3
+};
+
+function estimateDuration(taskName) {
+  if (!taskName) return 5;
+  const lower = taskName.toLowerCase();
+  let best = 0;
+  for (const [kw, mins] of Object.entries(DURATION_KEYWORDS)) {
+    if (lower.includes(kw)) {
+      if (mins > best) best = mins;
+    }
+  }
+  return best || 5;
+}
+
+function effectiveDuration(task) {
+  return task.duration && task.duration > 0 ? task.duration : estimateDuration(task.name);
+}
+
 let apiKey = '';
 let allTasks = [];
 let currentBlock = 'Morning';
@@ -269,6 +331,7 @@ let currentIndex = 0;
 let timerInterval = null;
 let timerSeconds = 0;
 let timerRunning = false;
+let timerOvertoneFired = false;
 
 // ── STORAGE (in-memory + try to persist key) ──
 function getStoredKey() {
@@ -364,7 +427,8 @@ async function syncTasks() {
         lastCompleted: r.fields[FIELDS.lastCompleted] || null,
         notes: r.fields[FIELDS.notes] || '',
         cadence: r.fields[FIELDS.cadence] || 1,
-        subCategory: extractSelect(r.fields[FIELDS.subCategory])
+        subCategory: extractSelect(r.fields[FIELDS.subCategory]),
+        timeHistory: (FIELDS.timeHistory ? r.fields[FIELDS.timeHistory] : '') || ''
       }))
       .filter(t => {
         // Show recurring tasks that haven't been completed today
@@ -505,15 +569,58 @@ function render() {
   } else {
     const task = tasks[currentIndex];
     const isRunning = timerRunning && task.status === 'In Progress';
+    const estMin = effectiveDuration(task);
+    const isEstimated = !task.duration || task.duration === 0;
+
+    // Ring geometry
+    const RING_R = 80;
+    const CIRC = 2 * Math.PI * RING_R;
+    let pctRemaining = 1; // 1 = full ring, 0 = empty
+    let overrun = false;
+    if (isRunning) {
+      const total = estMin * 60;
+      const remaining = total - timerSeconds;
+      pctRemaining = Math.max(0, remaining / total);
+      overrun = timerSeconds > total;
+    }
+    const dashOffset = CIRC * (1 - pctRemaining);
+
+    // Centre display
+    let mmss, label;
+    if (isRunning) {
+      if (overrun) {
+        const over = timerSeconds - (estMin * 60);
+        mmss = '+' + formatTime(over);
+        label = 'OVER';
+      } else {
+        const remaining = (estMin * 60) - timerSeconds;
+        mmss = formatTime(remaining);
+        label = 'REMAINING';
+      }
+    } else {
+      mmss = formatTime(estMin * 60);
+      label = isEstimated ? `EST · ${estMin}m` : `${estMin}m`;
+    }
 
     area.innerHTML = `
       <div class="task-number">Task ${currentIndex + 1} of ${tasks.length}</div>
       <div class="task-name">${task.name}</div>
-      <div class="task-duration">${task.duration ? task.duration + ' min' : ''}</div>
-      <div class="timer ${isRunning ? 'running' : ''}" id="timer-display">${formatTime(timerSeconds)}</div>
+      <div class="task-duration">${isEstimated ? '→ est ' + estMin + 'm' : '→ ' + estMin + 'm'}</div>
+      <div class="timer-wrap">
+        <svg class="timer-ring" viewBox="0 0 180 180">
+          <circle class="timer-ring-bg" cx="90" cy="90" r="${RING_R}"></circle>
+          <circle class="timer-ring-fg ${overrun ? 'overrun' : ''}" cx="90" cy="90" r="${RING_R}"
+            stroke-dasharray="${CIRC}" stroke-dashoffset="${overrun ? 0 : dashOffset}"></circle>
+        </svg>
+        <div class="timer-center">
+          <div class="timer-mmss ${overrun ? 'overrun' : ''}" id="timer-mmss">${mmss}</div>
+          <div class="timer-label" id="timer-label">${label}</div>
+        </div>
+      </div>
       <div class="actions">
         ${task.status === 'To Do' ? `
           <button class="act-btn btn-start" onclick="startTask()">Start</button>
+          <button class="act-btn btn-done" onclick="completeTask()">Done ✓</button>
           <button class="act-btn btn-skip" onclick="skipTask()">Skip</button>
         ` : task.status === 'In Progress' ? `
           <button class="act-btn btn-done" onclick="completeTask()">Done ✓</button>
@@ -539,18 +646,128 @@ function startTask() {
   updateTaskStatus(task.id, 'In Progress', false);
   timerSeconds = 0;
   timerRunning = true;
+  timerOvertoneFired = false;
+  const estMin = effectiveDuration(task);
+  const totalSec = estMin * 60;
+
   timerInterval = setInterval(() => {
     timerSeconds++;
-    const disp = document.getElementById('timer-display');
-    if (disp) disp.textContent = formatTime(timerSeconds);
+    updateTimerDisplay(totalSec);
+    // Trigger end-of-timer once
+    if (timerSeconds === totalSec && !timerOvertoneFired) {
+      timerOvertoneFired = true;
+      try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch(e){}
+      playTimerEndTone();
+    }
   }, 1000);
   render();
+}
+
+function updateTimerDisplay(totalSec) {
+  const RING_R = 80;
+  const CIRC = 2 * Math.PI * RING_R;
+  const remaining = totalSec - timerSeconds;
+  const overrun = timerSeconds > totalSec;
+  const pctRemaining = Math.max(0, remaining / totalSec);
+  const dashOffset = CIRC * (1 - pctRemaining);
+
+  const fg = document.querySelector('.timer-ring-fg');
+  const mmss = document.getElementById('timer-mmss');
+  const label = document.getElementById('timer-label');
+  if (!fg || !mmss || !label) return;
+
+  if (overrun) {
+    fg.classList.add('overrun');
+    fg.setAttribute('stroke-dashoffset', 0);
+    mmss.classList.add('overrun');
+    mmss.textContent = '+' + formatTime(timerSeconds - totalSec);
+    label.textContent = 'OVER';
+  } else {
+    fg.setAttribute('stroke-dashoffset', dashOffset);
+    mmss.textContent = formatTime(remaining);
+    label.textContent = 'REMAINING';
+  }
+}
+
+function playTimerEndTone() {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain); gain.connect(ctx.destination);
+    osc.frequency.value = 660; // E5
+    gain.gain.setValueAtTime(0.15, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.3);
+    osc.start();
+    osc.stop(ctx.currentTime + 0.3);
+  } catch(e) { /* silent fail */ }
+}
+
+// Rolling average learning. Weight: 0.7 old, 0.3 new. Updates Duration in Airtable.
+// Also appends to Time History field if it's wired up.
+async function learnDuration(task, actualSec) {
+  const actualMin = actualSec / 60;
+  const currentDur = task.duration && task.duration > 0
+    ? task.duration
+    : estimateDuration(task.name);
+  const newDur = Math.max(1, Math.round((currentDur * 0.7) + (actualMin * 0.3)));
+  const delta = newDur - currentDur;
+
+  // Build history string. Format: "YYYY-MM-DD: Xm" lines, keep last 5.
+  const today = new Date().toISOString().split('T')[0];
+  const entry = `${today}: ${actualMin.toFixed(1)}m`;
+  let history = (task.timeHistory || '').split('\n').filter(Boolean);
+  history.unshift(entry);
+  history = history.slice(0, 5);
+  const historyStr = history.join('\n');
+
+  // Patch Airtable
+  const fields = {};
+  fields[FIELDS.duration] = newDur;
+  if (FIELDS.timeHistory) {
+    fields[FIELDS.timeHistory] = historyStr;
+  }
+  try {
+    await airtableFetch(`/${task.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ fields })
+    });
+    // Update local
+    task.duration = newDur;
+    task.timeHistory = historyStr;
+  } catch (e) {
+    console.error('Duration learn failed:', e);
+  }
+
+  // Toast
+  const deltaStr = delta === 0 ? '0' : (delta > 0 ? '+' + delta : delta);
+  showLearnToast(`📊 ${actualMin.toFixed(1)}m logged (avg: ${newDur}m, ${deltaStr})`);
+}
+
+function showLearnToast(msg) {
+  let toast = document.getElementById('learn-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'learn-toast';
+    toast.className = 'learn-toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = msg;
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 3000);
 }
 
 function completeTask() {
   const tasks = getBlockTasks(currentBlock);
   const task = tasks[currentIndex];
   if (!task) return;
+
+  // Auto-learn duration if we actually timed this session
+  const actualSec = timerSeconds;
+  const wasTimed = timerRunning && actualSec >= 30;
+  if (wasTimed) {
+    learnDuration(task, actualSec);
+  }
 
   task.status = 'Done';
   task.lastCompleted = new Date().toISOString().split('T')[0];
@@ -633,6 +850,7 @@ function stopTimer() {
   clearInterval(timerInterval);
   timerRunning = false;
   timerSeconds = 0;
+  timerOvertoneFired = false;
 }
 
 function formatTime(s) {
