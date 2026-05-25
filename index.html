@@ -343,7 +343,7 @@ const BLOCKS = [
   { name: 'Evening', color: '#a855f7', icon: '🌙', time: '4–8pm' },
   { name: 'Maintenance', color: '#64748b', icon: '🧹', time: 'As needed' },
   { name: 'Outsourced', color: '#94a3b8', icon: '💸', time: 'Book it' },
-  { name: 'Work Fallbacks', color: '#14b8a6', icon: '⚡', time: 'When stuck' },
+  { name: 'Work Fallbacks', displayName: 'Work', color: '#14b8a6', icon: '⚡', time: 'Daily work' },
   { name: 'Loving Liz', color: '#ec4899', icon: '💗', time: 'Anytime' }
 ];
 
@@ -583,7 +583,7 @@ function renderBlockBar() {
     return `<button class="block-btn ${currentBlock === b.name ? 'active' : ''}"
       onclick="switchBlock('${b.name}')"
       style="${currentBlock === b.name ? `--current-accent:${b.color}` : ''}">
-      ${b.icon} ${b.name} <span style="opacity:0.6;font-size:0.8rem">${done}/${count}</span>
+      ${b.icon} ${b.displayName || b.name} <span style="opacity:0.6;font-size:0.8rem">${done}/${count}</span>
     </button>`;
   }).join('');
 }
@@ -628,10 +628,12 @@ function render() {
 
   if (currentIndex >= tasks.length) {
     // All done!
+    const blockObj = BLOCKS.find(b => b.name === currentBlock);
+    const displayName = blockObj?.displayName || currentBlock;
     area.innerHTML = `
       <div class="all-done">
         <h2>All done! ✓</h2>
-        <p>${currentBlock} block complete</p>
+        <p>${displayName} block complete</p>
         <p style="margin-top:1rem;font-size:0.9rem">Switch to another block above, or add tasks in Airtable and tap sync.</p>
       </div>`;
   } else {
