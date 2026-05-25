@@ -125,7 +125,7 @@
     z-index: 0;
   }
 
-  /* TIMER - massive circular ring */
+  /* TIMER - pie chart sweep */
   .timer-wrap {
     position: relative;
     width: min(70vw, 70vh, 600px);
@@ -133,20 +133,25 @@
     max-width: 600px; max-height: 600px;
     margin: 1rem auto 1.5rem auto;
   }
-  .timer-ring { width: 100%; height: 100%; transform: rotate(-90deg); }
-  .timer-ring-bg {
-    fill: none; stroke: var(--card-hover); stroke-width: 6;
+  .timer-pie { width: 100%; height: 100%; }
+  .timer-pie-bg {
+    fill: var(--card-hover);
   }
-  .timer-ring-fg {
-    fill: none; stroke: var(--current-accent); stroke-width: 6;
-    stroke-linecap: round;
-    transition: stroke-dashoffset 0.5s linear, stroke 0.3s;
+  .timer-pie-fill {
+    fill: var(--current-accent);
+    transition: opacity 0.3s;
   }
-  .timer-ring-fg.overrun { stroke: #ef4444; }
+  .timer-pie-fill.overrun {
+    fill: #ef4444;
+  }
+  .timer-pie-border {
+    fill: none; stroke: var(--card-hover); stroke-width: 3;
+  }
   .timer-center {
     position: absolute; inset: 0;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
+    pointer-events: none;
   }
   .timer-mmss {
     font-size: clamp(3.5rem, 14vw, 8rem);
@@ -154,13 +159,16 @@
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.01em;
     line-height: 1;
+    color: white;
+    text-shadow: 0 2px 8px rgba(0,0,0,0.4);
   }
-  .timer-mmss.overrun { color: #ef4444; }
+  .timer-mmss.overrun { color: white; }
   .timer-label {
     font-size: clamp(0.7rem, 1.5vw, 1rem);
-    color: var(--text-dim);
+    color: rgba(255,255,255,0.85);
     text-transform: uppercase; letter-spacing: 0.15em;
     margin-top: 12px; font-weight: 500;
+    text-shadow: 0 1px 4px rgba(0,0,0,0.4);
   }
 
   /* Bigger task name when timer is showing */
@@ -367,6 +375,21 @@ function estimateDuration(taskName) {
 
 function effectiveDuration(task) {
   return task.duration && task.duration > 0 ? task.duration : estimateDuration(task.name);
+}
+
+// Build an SVG path for a pie slice from 12 o'clock sweeping clockwise.
+// pct is 0 to 1. Returns empty path at 0, full circle at 1.
+function buildPiePath(cx, cy, r, pct) {
+  if (pct <= 0) return '';
+  if (pct >= 1) {
+    // Full circle (two arcs because SVG can't do 360° in one arc)
+    return `M ${cx} ${cy-r} A ${r} ${r} 0 1 1 ${cx-0.01} ${cy-r} Z`;
+  }
+  const angle = pct * 2 * Math.PI;
+  const endX = cx + r * Math.sin(angle);
+  const endY = cy - r * Math.cos(angle);
+  const largeArc = pct > 0.5 ? 1 : 0;
+  return `M ${cx} ${cy} L ${cx} ${cy-r} A ${r} ${r} 0 ${largeArc} 1 ${endX} ${endY} Z`;
 }
 
 let apiKey = '';
@@ -617,18 +640,17 @@ function render() {
     const estMin = effectiveDuration(task);
     const isEstimated = !task.duration || task.duration === 0;
 
-    // Ring geometry
-    const RING_R = 80;
-    const CIRC = 2 * Math.PI * RING_R;
-    let pctRemaining = 1; // 1 = full ring, 0 = empty
+    // Pie geometry
+    const CX = 100, CY = 100, R = 95;
+    // pctElapsed: 0 to 1, fraction of pie that is solid filled
+    let pctElapsed = 0;
     let overrun = false;
     if (isRunning) {
       const total = estMin * 60;
-      const remaining = total - timerSeconds;
-      pctRemaining = Math.max(0, remaining / total);
+      pctElapsed = Math.min(1, timerSeconds / total);
       overrun = timerSeconds > total;
     }
-    const dashOffset = CIRC * (1 - pctRemaining);
+    const piePath = buildPiePath(CX, CY, R, pctElapsed);
 
     // Centre display
     let mmss, label;
@@ -652,10 +674,10 @@ function render() {
       <div class="task-name">${task.name}</div>
       <div class="task-duration">${isEstimated ? '→ est ' + estMin + 'm' : '→ ' + estMin + 'm'}</div>
       <div class="timer-wrap">
-        <svg class="timer-ring" viewBox="0 0 180 180">
-          <circle class="timer-ring-bg" cx="90" cy="90" r="${RING_R}"></circle>
-          <circle class="timer-ring-fg ${overrun ? 'overrun' : ''}" cx="90" cy="90" r="${RING_R}"
-            stroke-dasharray="${CIRC}" stroke-dashoffset="${overrun ? 0 : dashOffset}"></circle>
+        <svg class="timer-pie" viewBox="0 0 200 200">
+          <circle class="timer-pie-bg" cx="${CX}" cy="${CY}" r="${R}"></circle>
+          <path class="timer-pie-fill ${overrun ? 'overrun' : ''}" id="timer-pie-fill" d="${piePath}"></path>
+          <circle class="timer-pie-border" cx="${CX}" cy="${CY}" r="${R}"></circle>
         </svg>
         <div class="timer-center">
           <div class="timer-mmss ${overrun ? 'overrun' : ''}" id="timer-mmss">${mmss}</div>
@@ -718,42 +740,41 @@ function startTask() {
 }
 
 function updateTimerDisplay(totalSec) {
-  const RING_R = 80;
-  const CIRC = 2 * Math.PI * RING_R;
+  const CX = 100, CY = 100, R = 95;
   const remaining = totalSec - timerSeconds;
   const overrun = timerSeconds > totalSec;
-  const pctRemaining = Math.max(0, remaining / totalSec);
   const pctElapsed = Math.min(1, timerSeconds / totalSec);
-  const dashOffset = CIRC * (1 - pctRemaining);
+  const pctRemaining = Math.max(0, 1 - pctElapsed);
 
-  const fg = document.querySelector('.timer-ring-fg');
+  const pieFill = document.getElementById('timer-pie-fill');
   const mmss = document.getElementById('timer-mmss');
   const label = document.getElementById('timer-label');
   const topBarFill = document.getElementById('top-bar-fill');
   const bgTint = document.getElementById('bg-tint');
 
-  if (!fg || !mmss || !label) return;
+  if (!pieFill || !mmss || !label) return;
 
-  // Top bar depletes left-to-right as time passes
+  // Pie fill grows clockwise from 12 o'clock
+  pieFill.setAttribute('d', buildPiePath(CX, CY, R, overrun ? 1 : pctElapsed));
+
+  // Top bar depletes left-to-right
   if (topBarFill) {
     topBarFill.style.width = (pctRemaining * 100) + '%';
     if (overrun) topBarFill.classList.add('overrun');
     else topBarFill.classList.remove('overrun');
   }
 
-  // Background tint grows as time passes, up to 12% opacity max
+  // Background tint grows
   if (bgTint) {
     bgTint.style.opacity = overrun ? 0.18 : (pctElapsed * 0.12);
   }
 
   if (overrun) {
-    fg.classList.add('overrun');
-    fg.style.strokeDashoffset = 0;
+    pieFill.classList.add('overrun');
     mmss.classList.add('overrun');
     mmss.textContent = '+' + formatTime(timerSeconds - totalSec);
     label.textContent = 'OVER';
   } else {
-    fg.style.strokeDashoffset = dashOffset;
     mmss.textContent = formatTime(remaining);
     label.textContent = 'REMAINING';
   }
