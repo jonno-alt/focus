@@ -235,6 +235,24 @@
   .row-name { flex: 1; font-size: 0.95rem; }
   .row-dur { color: var(--text-dim); font-size: 0.85rem; flex-shrink: 0; }
 
+  .row-status.st-repeat {
+    background: transparent !important;
+    border-color: var(--current-accent, var(--text-dim)) !important;
+    color: var(--current-accent, var(--text-dim));
+    font-size: 0.7rem; font-weight: 700;
+    width: auto; min-width: 22px; padding: 0 4px;
+  }
+
+  .count-badge {
+    display: inline-block;
+    background: var(--current-accent, #14b8a6);
+    color: white;
+    padding: 4px 12px; border-radius: 999px;
+    font-size: 0.6em; font-weight: 700;
+    vertical-align: middle; margin-left: 12px;
+    letter-spacing: 0.05em;
+  }
+
   .cat-header {
     color: var(--text-dim); font-size: 0.75rem;
     text-transform: uppercase; letter-spacing: 0.08em;
@@ -333,7 +351,9 @@ const FIELDS = {
   notes: 'fldZaGTO1x8hZL894',
   cadence: 'fldD9bNoB2IbLNGvG',
   subCategory: 'fldY1M1franWJQ0Gt',
-  timeHistory: null  // set to field ID once Cowork creates the 'Time History' long text field
+  timeHistory: null,  // set to field ID once Cowork creates the 'Time History' long text field
+  dailyCount: 'flduE84vrzfDYdPDX',
+  repeatable: 'fldrlHiuHEBL9OoHQ'
 };
 
 const BLOCKS = [
@@ -496,7 +516,9 @@ async function syncTasks() {
         notes: r.fields[FIELDS.notes] || '',
         cadence: r.fields[FIELDS.cadence] || 1,
         subCategory: extractSelect(r.fields[FIELDS.subCategory]),
-        timeHistory: (FIELDS.timeHistory ? r.fields[FIELDS.timeHistory] : '') || ''
+        timeHistory: (FIELDS.timeHistory ? r.fields[FIELDS.timeHistory] : '') || '',
+        dailyCount: r.fields[FIELDS.dailyCount] || 0,
+        repeatable: !!r.fields[FIELDS.repeatable]
       }))
       .filter(t => {
         // Show recurring tasks that haven't been completed today
@@ -529,6 +551,15 @@ async function syncTasks() {
           // Update in Airtable
           updateTaskStatus(t.id, 'To Do', false);
         }
+      }
+      // Reset daily count for repeatable tasks if last completed wasn't today
+      if (t.repeatable && t.dailyCount > 0 && t.lastCompleted !== today) {
+        t.dailyCount = 0;
+        // Persist the reset
+        airtableFetch(`/${t.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ fields: { [FIELDS.dailyCount]: 0 } })
+        }).catch(e => console.error('Count reset failed:', e));
       }
     }
 
@@ -671,9 +702,13 @@ function render() {
       label = isEstimated ? `EST · ${estMin}m` : `${estMin}m`;
     }
 
+    const countBadge = task.repeatable && task.dailyCount > 0
+      ? `<span class="count-badge">×${task.dailyCount}</span>`
+      : '';
+
     area.innerHTML = `
       <div class="task-number">Task ${currentIndex + 1} of ${tasks.length}</div>
-      <div class="task-name">${task.name}</div>
+      <div class="task-name">${task.name} ${countBadge}</div>
       <div class="task-duration">${isEstimated ? '→ est ' + estMin + 'm' : '→ ' + estMin + 'm'}</div>
       <div class="timer-wrap">
         <svg class="timer-pie" viewBox="0 0 200 200">
@@ -687,7 +722,11 @@ function render() {
         </div>
       </div>
       <div class="actions">
-        ${task.status === 'To Do' ? `
+        ${task.repeatable ? `
+          ${task.status === 'In Progress' ? `<button class="act-btn btn-start" onclick="startTask()">Restart</button>` : `<button class="act-btn btn-start" onclick="startTask()">Start</button>`}
+          <button class="act-btn btn-done" onclick="incrementCount()">+1 ✓</button>
+          <button class="act-btn btn-skip" onclick="skipTask()">Skip</button>
+        ` : (task.status === 'To Do' ? `
           <button class="act-btn btn-start" onclick="startTask()">Start</button>
           <button class="act-btn btn-done" onclick="completeTask()">Done ✓</button>
           <button class="act-btn btn-skip" onclick="skipTask()">Skip</button>
@@ -696,7 +735,7 @@ function render() {
           <button class="act-btn btn-skip" onclick="skipTask()">Skip</button>
         ` : `
           <button class="act-btn btn-nav" onclick="nextTask()">Next →</button>
-        `}
+        `)}
         ${currentIndex > 0 ? `<button class="act-btn btn-nav" onclick="prevTask()">← Back</button>` : ''}
       </div>
     `;
@@ -876,6 +915,45 @@ function completeTask() {
   }, 300);
 }
 
+// Repeatable task: increment Daily Count, keep task in list, don't auto-advance
+async function incrementCount() {
+  const tasks = getBlockTasks(currentBlock);
+  const task = tasks[currentIndex];
+  if (!task) return;
+
+  // Auto-learn duration if timed
+  const actualSec = timerSeconds;
+  const wasTimed = timerRunning && actualSec >= 30;
+  if (wasTimed) {
+    learnDuration(task, actualSec);
+  }
+
+  task.dailyCount = (task.dailyCount || 0) + 1;
+  task.lastCompleted = new Date().toISOString().split('T')[0];
+  task.status = 'To Do';  // Stay actionable for next increment
+
+  // Persist count + lastCompleted, reset status to To Do
+  try {
+    await airtableFetch(`/${task.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({
+        fields: {
+          [FIELDS.dailyCount]: task.dailyCount,
+          [FIELDS.lastCompleted]: task.lastCompleted,
+          [FIELDS.status]: 'To Do'
+        }
+      })
+    });
+  } catch (e) {
+    console.error('Increment failed:', e);
+  }
+
+  stopTimer();
+  showLearnToast(`✓ ${task.name} ×${task.dailyCount}`);
+  renderBlockBar();
+  render();
+}
+
 function skipTask() {
   const tasks = getBlockTasks(currentBlock);
   const task = tasks[currentIndex];
@@ -999,9 +1077,15 @@ function renderTaskRow(t, i) {
   const stClass = t.status === 'Done' ? 'st-done' : t.status === 'Skipped' ? 'st-skip' : t.status === 'In Progress' ? 'st-progress' : '';
   const rowClass = t.status === 'Done' ? 'done-row' : t.status === 'Skipped' ? 'skipped-row' : '';
   const currentClass = i === currentIndex ? 'current-row' : '';
-  const icon = t.status === 'Done' ? '✓' : t.status === 'Skipped' ? '–' : t.status === 'In Progress' ? '►' : '';
+  let icon;
+  if (t.repeatable) {
+    icon = t.dailyCount > 0 ? `×${t.dailyCount}` : '';
+  } else {
+    icon = t.status === 'Done' ? '✓' : t.status === 'Skipped' ? '–' : t.status === 'In Progress' ? '►' : '';
+  }
+  const repeatableClass = t.repeatable ? 'st-repeat' : '';
   return `<div class="task-row ${rowClass} ${currentClass}" onclick="jumpToTask(${i})">
-    <div class="row-status ${stClass}">${icon}</div>
+    <div class="row-status ${stClass} ${repeatableClass}">${icon}</div>
     <div class="row-name">${t.name}</div>
     <div class="row-dur">${t.duration ? t.duration + 'm' : ''}</div>
   </div>`;
