@@ -678,12 +678,12 @@ function updateTimerDisplay(totalSec) {
 
   if (overrun) {
     fg.classList.add('overrun');
-    fg.setAttribute('stroke-dashoffset', 0);
+    fg.style.strokeDashoffset = 0;
     mmss.classList.add('overrun');
     mmss.textContent = '+' + formatTime(timerSeconds - totalSec);
     label.textContent = 'OVER';
   } else {
-    fg.setAttribute('stroke-dashoffset', dashOffset);
+    fg.style.strokeDashoffset = dashOffset;
     mmss.textContent = formatTime(remaining);
     label.textContent = 'REMAINING';
   }
