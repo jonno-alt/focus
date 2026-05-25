@@ -103,17 +103,42 @@
   .task-name { font-size: 2rem; font-weight: 700; line-height: 1.2; margin-bottom: 12px; }
   .task-duration { font-size: 1rem; color: var(--text-dim); margin-bottom: 1.5rem; }
 
-  /* TIMER - circular ring */
+  /* TOP PROGRESS BAR - pinned to top of viewport, depletes left-to-right */
+  .top-bar-wrap {
+    position: fixed; top: env(safe-area-inset-top, 0); left: 0; right: 0;
+    height: 8px; background: var(--card-hover);
+    z-index: 100; pointer-events: none;
+  }
+  .top-bar-fill {
+    height: 100%; background: var(--current-accent, #3b82f6);
+    width: 100%;
+    transition: width 0.5s linear, background 0.3s;
+  }
+  .top-bar-fill.overrun { background: #ef4444; }
+
+  /* BACKGROUND TINT - grows as time passes, subtle accent overlay */
+  .bg-tint {
+    position: fixed; inset: 0; pointer-events: none;
+    background: var(--current-accent, transparent);
+    opacity: 0;
+    transition: opacity 0.5s linear;
+    z-index: 0;
+  }
+
+  /* TIMER - massive circular ring */
   .timer-wrap {
-    position: relative; width: 180px; height: 180px;
-    margin: 0 auto 1.5rem auto;
+    position: relative;
+    width: min(70vw, 70vh, 600px);
+    height: min(70vw, 70vh, 600px);
+    max-width: 600px; max-height: 600px;
+    margin: 1rem auto 1.5rem auto;
   }
   .timer-ring { width: 100%; height: 100%; transform: rotate(-90deg); }
   .timer-ring-bg {
-    fill: none; stroke: var(--card-hover); stroke-width: 10;
+    fill: none; stroke: var(--card-hover); stroke-width: 6;
   }
   .timer-ring-fg {
-    fill: none; stroke: var(--current-accent); stroke-width: 10;
+    fill: none; stroke: var(--current-accent); stroke-width: 6;
     stroke-linecap: round;
     transition: stroke-dashoffset 0.5s linear, stroke 0.3s;
   }
@@ -124,14 +149,26 @@
     align-items: center; justify-content: center;
   }
   .timer-mmss {
-    font-size: 2.4rem; font-weight: 300;
-    font-variant-numeric: tabular-nums; letter-spacing: 0.02em;
+    font-size: clamp(3.5rem, 14vw, 8rem);
+    font-weight: 200;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: 0.01em;
+    line-height: 1;
   }
   .timer-mmss.overrun { color: #ef4444; }
   .timer-label {
-    font-size: 0.7rem; color: var(--text-dim);
-    text-transform: uppercase; letter-spacing: 0.08em; margin-top: 4px;
+    font-size: clamp(0.7rem, 1.5vw, 1rem);
+    color: var(--text-dim);
+    text-transform: uppercase; letter-spacing: 0.15em;
+    margin-top: 12px; font-weight: 500;
   }
+
+  /* Bigger task name when timer is showing */
+  .task-name {
+    font-size: clamp(1.5rem, 4vw, 3rem) !important;
+    font-weight: 700; line-height: 1.2; margin-bottom: 12px;
+  }
+
   .learn-toast {
     position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
     background: var(--card); color: var(--text); padding: 8px 16px;
@@ -231,6 +268,14 @@
 </style>
 </head>
 <body>
+
+<!-- Background tint overlay -->
+<div class="bg-tint" id="bg-tint"></div>
+
+<!-- Top progress bar -->
+<div class="top-bar-wrap" id="top-bar-wrap" style="display:none">
+  <div class="top-bar-fill" id="top-bar-fill"></div>
+</div>
 
 <!-- SETUP: Enter API Key -->
 <div id="setup-screen">
@@ -650,6 +695,15 @@ function startTask() {
   const estMin = effectiveDuration(task);
   const totalSec = estMin * 60;
 
+  // Show top progress bar
+  const topBar = document.getElementById('top-bar-wrap');
+  const topBarFill = document.getElementById('top-bar-fill');
+  if (topBar) topBar.style.display = 'block';
+  if (topBarFill) {
+    topBarFill.style.width = '100%';
+    topBarFill.classList.remove('overrun');
+  }
+
   timerInterval = setInterval(() => {
     timerSeconds++;
     updateTimerDisplay(totalSec);
@@ -669,12 +723,28 @@ function updateTimerDisplay(totalSec) {
   const remaining = totalSec - timerSeconds;
   const overrun = timerSeconds > totalSec;
   const pctRemaining = Math.max(0, remaining / totalSec);
+  const pctElapsed = Math.min(1, timerSeconds / totalSec);
   const dashOffset = CIRC * (1 - pctRemaining);
 
   const fg = document.querySelector('.timer-ring-fg');
   const mmss = document.getElementById('timer-mmss');
   const label = document.getElementById('timer-label');
+  const topBarFill = document.getElementById('top-bar-fill');
+  const bgTint = document.getElementById('bg-tint');
+
   if (!fg || !mmss || !label) return;
+
+  // Top bar depletes left-to-right as time passes
+  if (topBarFill) {
+    topBarFill.style.width = (pctRemaining * 100) + '%';
+    if (overrun) topBarFill.classList.add('overrun');
+    else topBarFill.classList.remove('overrun');
+  }
+
+  // Background tint grows as time passes, up to 12% opacity max
+  if (bgTint) {
+    bgTint.style.opacity = overrun ? 0.18 : (pctElapsed * 0.12);
+  }
 
   if (overrun) {
     fg.classList.add('overrun');
@@ -851,6 +921,12 @@ function stopTimer() {
   timerRunning = false;
   timerSeconds = 0;
   timerOvertoneFired = false;
+
+  // Hide top bar and reset background tint
+  const topBar = document.getElementById('top-bar-wrap');
+  const bgTint = document.getElementById('bg-tint');
+  if (topBar) topBar.style.display = 'none';
+  if (bgTint) bgTint.style.opacity = 0;
 }
 
 function formatTime(s) {
