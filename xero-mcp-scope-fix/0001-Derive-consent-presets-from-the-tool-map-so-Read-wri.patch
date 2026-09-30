@@ -1,7 +1,7 @@
 From 6063bebc24fe3505de78de086f7c219f454d521a Mon Sep 17 00:00:00 2001
 From: Jonno White <jonno@consultclarity.org>
 Date: Wed, 30 Sep 2026 03:39:57 +0000
-Subject: [PATCH] Derive consent presets from the tool map so Read + write
+Subject: [PATCH 1/2] Derive consent presets from the tool map so Read + write
  covers every implemented tool
 
 - scopesForPreset is now computed from TOOL_SCOPE_MAP: readwrite requests every

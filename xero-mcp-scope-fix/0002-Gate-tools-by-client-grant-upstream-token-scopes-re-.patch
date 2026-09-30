@@ -1,0 +1,498 @@
+From 64e3beb38deab4b3be028173cf65477774d975cd Mon Sep 17 00:00:00 2001
+From: Jonno White <jonno@consultclarity.org>
+Date: Wed, 30 Sep 2026 04:39:40 +0000
+Subject: [PATCH 2/2] =?UTF-8?q?Gate=20tools=20by=20client=20grant=20?=
+ =?UTF-8?q?=E2=88=A9=20upstream=20token=20scopes,=20re-checked=20per=20cal?=
+ =?UTF-8?q?l?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- New src/auth/effective-scopes.ts: a session's usable scopes are the
+  intersection of what this MCP client's user approved at its own consent
+  and what the Xero tokens behind the session carry now. A wider token set
+  (for example from another client's newer consent in a shared token store)
+  can never widen a client beyond its own grant; a narrower one narrows it.
+- registerAllTools takes the two scope sources, registers from the
+  intersection, and wraps every tool callback with a request-time re-check
+  that fails closed with insufficient_scope instead of calling Xero when
+  the upstream scopes changed after connection.
+- index.ts passes props.scopes (this client's grant) and session.scopes
+  (live token scopes) separately.
+- list_granted_scopes reports client_grant_scopes, upstream_token_scopes
+  and withheld_from_this_client alongside available/unavailable tools.
+- Tests: 6 for the intersection rules, 8 for isolation and post-narrowing
+  invocation (35 total).
+---
+ src/auth/effective-scopes.test.ts |  53 ++++++++++++++
+ src/auth/effective-scopes.ts      |  50 +++++++++++++
+ src/index.ts                      |  11 ++-
+ src/mcp/register-tools.test.ts    | 118 +++++++++++++++++++++++++++++-
+ src/mcp/register-tools.ts         |  62 +++++++++++++++-
+ src/mcp/tools/org.ts              |  20 ++++-
+ 6 files changed, 302 insertions(+), 12 deletions(-)
+ create mode 100644 src/auth/effective-scopes.test.ts
+ create mode 100644 src/auth/effective-scopes.ts
+
+diff --git a/src/auth/effective-scopes.test.ts b/src/auth/effective-scopes.test.ts
+new file mode 100644
+index 0000000..e5618d5
+--- /dev/null
++++ b/src/auth/effective-scopes.test.ts
+@@ -0,0 +1,53 @@
++import { describe, expect, it } from "vitest";
++import { effectiveScopes, scopesWithheldFromClient } from "./effective-scopes";
++import { parseGrantedScopes, scopesForPreset, isWriteScope } from "./scopes";
++
++const READ = parseGrantedScopes(scopesForPreset("read").join(" "));
++const RW = parseGrantedScopes(scopesForPreset("readwrite").join(" "));
++
++describe("effectiveScopes (client grant ∩ upstream tokens)", () => {
++	it("read-only client never gains write from a wider shared token", () => {
++		const eff = effectiveScopes(READ, RW);
++		expect([...eff].filter(isWriteScope)).toEqual([]);
++		expect(eff.has("accounting.contacts.read")).toBe(true);
++		expect(eff.has("accounting.contacts")).toBe(false);
++		expect(eff.has("accounting.reports.profitandloss.read")).toBe(true);
++		expect(eff.has("offline_access")).toBe(true);
++	});
++
++	it("read+write client is narrowed to read when the shared token is read-only", () => {
++		const eff = effectiveScopes(RW, READ);
++		expect([...eff].filter(isWriteScope)).toEqual([]);
++		expect(eff.has("accounting.invoices.read")).toBe(true);
++		expect(eff.has("accounting.invoices")).toBe(false);
++	});
++
++	it("both read+write keeps every scope", () => {
++		const eff = effectiveScopes(RW, RW);
++		expect([...eff].sort()).toEqual([...RW].sort());
++	});
++
++	it("the pre-fix live grant on both sides is unchanged", () => {
++		const live = parseGrantedScopes(
++			"openid profile email offline_access accounting.contacts.read accounting.invoices accounting.settings.read",
++		);
++		expect([...effectiveScopes(live, live)].sort()).toEqual([...live].sort());
++	});
++
++	it("a scope the client never approved is withheld even if upstream has it", () => {
++		const client = parseGrantedScopes("openid offline_access accounting.contacts.read");
++		const upstream = parseGrantedScopes("openid offline_access accounting.contacts accounting.payments");
++		const eff = effectiveScopes(client, upstream);
++		expect([...eff].sort()).toEqual(["accounting.contacts.read", "offline_access", "openid"]);
++		expect(scopesWithheldFromClient(client, upstream)).toEqual([
++			"accounting.contacts",
++			"accounting.payments",
++		]);
++	});
++
++	it("a scope the client approved but upstream lost is dropped", () => {
++		const client = parseGrantedScopes("accounting.payments accounting.invoices");
++		const upstream = parseGrantedScopes("accounting.invoices");
++		expect([...effectiveScopes(client, upstream)]).toEqual(["accounting.invoices"]);
++	});
++});
+diff --git a/src/auth/effective-scopes.ts b/src/auth/effective-scopes.ts
+new file mode 100644
+index 0000000..57acf3d
+--- /dev/null
++++ b/src/auth/effective-scopes.ts
+@@ -0,0 +1,50 @@
++/**
++ * Effective scopes for one MCP client session.
++ *
++ * Two scope sets exist per session:
++ *   - clientGrant: what THIS MCP client's user approved at consent (its own /callback).
++ *     Immutable for the life of the MCP token.
++ *   - upstream:    what the Xero tokens the session actually uses carry right now. In a
++ *     deployment with a shared per-user token store, another client's newer consent can
++ *     replace these tokens with a wider or narrower scope set at any time.
++ *
++ * A tool may be used only when BOTH sets allow it. This function returns the
++ * intersection, expressed at the narrowest level that both sides cover:
++ *   client has write, upstream has read  → read
++ *   client has read,  upstream has write → read
++ *   both write                           → write
++ * Identity scopes (openid, profile, email, offline_access) pass through from the client
++ * grant; they gate no tools.
++ */
++
++import { IDENTITY_SCOPES, isWriteScope } from "./scopes";
++
++const IDENTITY = new Set<string>(IDENTITY_SCOPES);
++
++export function effectiveScopes(clientGrant: Set<string>, upstream: Set<string>): Set<string> {
++	const out = new Set<string>();
++	for (const c of clientGrant) {
++		if (IDENTITY.has(c)) {
++			out.add(c);
++			continue;
++		}
++		if (upstream.has(c)) {
++			out.add(c);
++			continue;
++		}
++		if (isWriteScope(c) && upstream.has(`${c}.read`)) {
++			out.add(`${c}.read`);
++			continue;
++		}
++		if (c.endsWith(".read") && upstream.has(c.replace(/\.read$/, ""))) {
++			out.add(c);
++		}
++	}
++	return out;
++}
++
++/** Scopes present in `upstream` but not usable by this client (for diagnostics only). */
++export function scopesWithheldFromClient(clientGrant: Set<string>, upstream: Set<string>): string[] {
++	const eff = effectiveScopes(clientGrant, upstream);
++	return [...upstream].filter((s) => !IDENTITY.has(s) && !eff.has(s)).sort();
++}
+diff --git a/src/index.ts b/src/index.ts
+index 76d44f2..f7f9353 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -85,12 +85,16 @@ export class XeroMCP extends McpAgent<Env, Record<string, never>, Props> {
+ 			);
+ 		};
+ 
++		// props.scopes is what THIS client's user approved at consent and never changes
++		// for the life of the MCP token; session.scopes is what the Xero tokens carry now.
++		// Tool gating uses the intersection (see registerAllTools), so a scope change on
++		// the token side can narrow a client but never widen it beyond its own consent.
+ 		const getProps = (): Props => ({
+ 			...props,
+ 			accessToken: this.session!.accessToken,
+ 			refreshToken: this.session!.refreshToken,
+ 			expiresAt: this.session!.expiresAt,
+-			scopes: this.session!.scopes,
++			scopes: props.scopes,
+ 			activeTenantId: this.session!.activeTenantId,
+ 		});
+ 
+@@ -102,7 +106,10 @@ export class XeroMCP extends McpAgent<Env, Record<string, never>, Props> {
+ 			await this.ctx.storage.put("session", this.session);
+ 		};
+ 
+-		registerAllTools(this.server, getClient, getProps, setActiveTenant);
++		registerAllTools(this.server, getClient, getProps, setActiveTenant, {
++			clientGrant: () => props.scopes,
++			upstream: () => this.session!.scopes,
++		});
+ 	}
+ }
+ 
+diff --git a/src/mcp/register-tools.test.ts b/src/mcp/register-tools.test.ts
+index aa9718c..920e428 100644
+--- a/src/mcp/register-tools.test.ts
++++ b/src/mcp/register-tools.test.ts
+@@ -10,15 +10,37 @@ import { registerAllTools } from "./register-tools";
+  * records every tool name, so "implemented but never registered" cannot slip through.
+  */
+ 
++type ToolCb = (args: unknown, extra: unknown) => Promise<{ content: { text: string }[]; isError?: boolean }>;
++
+ function fakeServer() {
+ 	const names: string[] = [];
++	const callbacks = new Map<string, ToolCb>();
+ 	const server = {
+-		tool(name: string, ..._rest: unknown[]) {
++		tool(name: string, ...rest: unknown[]) {
+ 			names.push(name);
++			callbacks.set(name, rest[rest.length - 1] as ToolCb);
+ 			return server;
+ 		},
+ 	};
+-	return { server: server as unknown as McpServer, names };
++	return { server: server as unknown as McpServer, names, callbacks };
++}
++
++/** Minimal client: tenant already active, every request returns an empty list. */
++function stubClient(calls: string[]) {
++	return {
++		getActiveTenantId: () => "11111111-1111-4111-8111-111111111111",
++		setActiveTenantId() {},
++		async assertTenantAllowed() {
++			return { tenantId: "t", tenantName: "T", tenantType: "ORGANISATION", id: "c" };
++		},
++		async listConnections() {
++			return [];
++		},
++		async request(method: string, path: string) {
++			calls.push(`${method} ${path}`);
++			return { Contacts: [] };
++		},
++	} as unknown as XeroClient;
+ }
+ 
+ function propsWithScopes(scopes: string): Props {
+@@ -48,6 +70,20 @@ function register(scopes: string) {
+ }
+ 
+ const CATALOG = Object.keys(TOOL_SCOPE_MAP).sort();
++const RW = scopesForPreset("readwrite").join(" ");
++const RO = scopesForPreset("read").join(" ");
++
++function registerWithSources(clientGrant: string, upstream: () => string, calls: string[] = []) {
++	const { server, names, callbacks } = fakeServer();
++	const result = registerAllTools(
++		server,
++		() => stubClient(calls),
++		() => propsWithScopes(clientGrant),
++		async () => {},
++		{ clientGrant: () => clientGrant, upstream },
++	);
++	return { names, callbacks, result, calls };
++}
+ 
+ describe("registerAllTools", () => {
+ 	it("every implemented tool has a scope entry, and every scope entry has an implementation", () => {
+@@ -150,4 +186,82 @@ describe("registerAllTools", () => {
+ 		server.tool("later_registered_tool", "desc", {}, async () => ({ content: [] }));
+ 		expect(names).toContain("later_registered_tool");
+ 	});
++
++	describe("client permission isolation with a shared upstream token", () => {
++		it("a read-only client gets no write tools even when the shared token is read+write", () => {
++			const { names, result } = registerWithSources(RO, () => RW);
++			expect(names.sort()).toEqual(CATALOG.filter(isReadTool));
++			expect(result.skipped).toContain("create_contact");
++			expect(result.skipped).toContain("create_invoice");
++		});
++
++		it("a read+write client is narrowed to read tools when the shared token is read-only", () => {
++			const { names } = registerWithSources(RW, () => RO);
++			expect(names).not.toContain("create_contact");
++			expect(names).toContain("list_contacts");
++		});
++
++		it("a client sees only what it approved even if another client approved more", () => {
++			const narrowClient = "openid offline_access accounting.contacts.read accounting.invoices";
++			const { names } = registerWithSources(narrowClient, () => RW);
++			expect(names).toContain("create_invoice");
++			expect(names).toContain("list_bills");
++			expect(names).not.toContain("create_contact");
++			expect(names).not.toContain("list_payments");
++			expect(names).not.toContain("get_profit_and_loss");
++		});
++
++		it("both read+write registers all 55 tools", () => {
++			const { names } = registerWithSources(RW, () => RW);
++			expect(names.sort()).toEqual(CATALOG);
++		});
++	});
++
++	describe("request-time re-check after the shared token narrows", () => {
++		it("a registered write tool fails closed with insufficient_scope and never calls Xero", async () => {
++			let upstream = RW;
++			const { callbacks, calls } = registerWithSources(RW, () => upstream);
++			const createContact = callbacks.get("create_contact");
++			expect(createContact).toBeDefined();
++			upstream = RO; // another client re-authorised read-only
++			const res = await createContact!({ name: "Test" }, {});
++			expect(res.isError).toBe(true);
++			const body = JSON.parse(res.content[0].text);
++			expect(body.code).toBe("insufficient_scope");
++			expect(body.required_scope).toBe("accounting.contacts");
++			expect(calls).toEqual([]);
++		});
++
++		it("a read tool still works after narrowing to read-only", async () => {
++			let upstream = RW;
++			const { callbacks, calls } = registerWithSources(RW, () => upstream);
++			upstream = RO;
++			const res = await callbacks.get("list_contacts")!({}, {});
++			expect(res.isError).toBeUndefined();
++			expect(calls).toEqual(["GET /Contacts"]);
++		});
++
++		it("session tools keep working whatever the upstream scopes are", async () => {
++			let upstream = RW;
++			const { callbacks } = registerWithSources(RW, () => upstream);
++			upstream = "openid";
++			const res = await callbacks.get("list_granted_scopes")!({}, {});
++			expect(res.isError).toBeUndefined();
++			const body = JSON.parse(res.content[0].text);
++			expect([...body.available_tools].sort()).toEqual(
++				["list_granted_scopes", "list_organisations", "set_active_organisation", "xero_whoami"],
++			);
++			expect(body.withheld_from_this_client).toEqual([]);
++			expect(body.unavailable_tools.map((u: { tool: string }) => u.tool)).toContain("create_contact");
++		});
++
++		it("list_granted_scopes shows what the shared token holds that this client did not approve", async () => {
++			const { callbacks } = registerWithSources(RO, () => RW);
++			const res = await callbacks.get("list_granted_scopes")!({}, {});
++			const body = JSON.parse(res.content[0].text);
++			expect(body.scopes).not.toContain("accounting.contacts");
++			expect(body.withheld_from_this_client).toContain("accounting.contacts");
++			expect(body.available_tools).not.toContain("create_contact");
++		});
++	});
+ });
+diff --git a/src/mcp/register-tools.ts b/src/mcp/register-tools.ts
+index ad82142..2072ec2 100644
+--- a/src/mcp/register-tools.ts
++++ b/src/mcp/register-tools.ts
+@@ -1,7 +1,9 @@
+ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
++import { effectiveScopes } from "../auth/effective-scopes";
+ import type { Props } from "../auth/props";
+ import { canRegisterTool, parseGrantedScopes, TOOL_SCOPE_MAP } from "../auth/scopes";
+ import type { XeroClient } from "../xero/client";
++import { toolError, XeroApiError } from "../xero/errors";
+ import { registerAttachmentTools } from "./tools/attachments";
+ import { registerBankTools } from "./tools/bank";
+ import { registerContactTools } from "./tools/contacts";
+@@ -20,10 +22,30 @@ export type RegistrationResult = {
+ 	unmapped: string[];
+ };
+ 
++export type ScopeSources = {
++	/** Scopes THIS client's user approved at its own consent. Fixed per MCP token. */
++	clientGrant: () => string;
++	/** Scopes carried by the Xero tokens the session uses right now (may be shared). */
++	upstream: () => string;
++};
++
++/** Effective scope set for a session: client grant ∩ upstream tokens. */
++export function sessionScopes(sources: ScopeSources): Set<string> {
++	return effectiveScopes(
++		parseGrantedScopes(sources.clientGrant()),
++		parseGrantedScopes(sources.upstream()),
++	);
++}
++
+ /**
+- * Register tools, filtering by granted Xero scopes.
++ * Register tools, filtering by the session's effective scopes.
+  * Org/session tools always register.
+  *
++ * Every registered tool is also re-checked at invocation time, because in a
++ * deployment with a shared token store the upstream scope set can change after
++ * registration. A tool whose scope was lost fails closed with `insufficient_scope`
++ * instead of reaching Xero.
++ *
+  * Note: McpServer.tool() registers immediately. We wrap domain registrars
+  * by temporarily patching server.tool to gate by TOOL_SCOPE_MAP.
+  */
+@@ -32,8 +54,13 @@ export function registerAllTools(
+ 	getClient: () => XeroClient,
+ 	getProps: () => Props,
+ 	setActiveTenant: (tenantId: string) => void | Promise<void>,
++	sources?: Partial<ScopeSources>,
+ ): RegistrationResult {
+-	const granted = parseGrantedScopes(getProps().scopes);
++	const scopeSources: ScopeSources = {
++		clientGrant: sources?.clientGrant ?? (() => getProps().scopes),
++		upstream: sources?.upstream ?? (() => getProps().scopes),
++	};
++	const granted = sessionScopes(scopeSources);
+ 	const result: RegistrationResult = { registered: [], skipped: [], unmapped: [] };
+ 
+ 	const originalTool = server.tool.bind(server);
+@@ -50,12 +77,13 @@ export function registerAllTools(
+ 			return server;
+ 		}
+ 		result.registered.push(name);
++		const guarded = guardInvocation(name, rest, scopeSources);
+ 		// @ts-expect-error rest spread matches overloads
+-		return originalTool(name, ...rest);
++		return originalTool(name, ...guarded);
+ 	};
+ 
+ 	try {
+-		registerOrgTools(server, getClient, getProps, setActiveTenant);
++		registerOrgTools(server, getClient, getProps, setActiveTenant, scopeSources);
+ 		registerContactTools(server, getClient);
+ 		registerInvoiceTools(server, getClient);
+ 		registerPaymentTools(server, getClient);
+@@ -71,3 +99,29 @@ export function registerAllTools(
+ 
+ 	return result;
+ }
++
++/** Wrap the tool callback (always the last argument) with a request-time scope check. */
++function guardInvocation(name: string, rest: unknown[], sources: ScopeSources): unknown[] {
++	const idx = rest.length - 1;
++	const cb = rest[idx];
++	if (typeof cb !== "function") return rest;
++	const wrapped = async (...args: unknown[]) => {
++		const now = sessionScopes(sources);
++		if (!canRegisterTool(name, now)) {
++			const req = TOOL_SCOPE_MAP[name]?.anyOf ?? [];
++			return toolError(
++				new XeroApiError(
++					`Tool ${name} is no longer permitted for this session: the Xero authorisation behind it changed after connection. Disconnect and reconnect this MCP server, then re-authorise at Xero.`,
++					403,
++					"insufficient_scope",
++					undefined,
++					req.join(" or "),
++				),
++			);
++		}
++		return (cb as (...a: unknown[]) => unknown)(...args);
++	};
++	const out = rest.slice();
++	out[idx] = wrapped;
++	return out;
++}
+diff --git a/src/mcp/tools/org.ts b/src/mcp/tools/org.ts
+index 50e3b25..e26303f 100644
+--- a/src/mcp/tools/org.ts
++++ b/src/mcp/tools/org.ts
+@@ -1,5 +1,6 @@
+ import { z } from "zod";
+ import type { Props } from "../../auth/props";
++import { effectiveScopes, scopesWithheldFromClient } from "../../auth/effective-scopes";
+ import { parseGrantedScopes, toolAvailability } from "../../auth/scopes";
+ import type { XeroClient } from "../../xero/client";
+ import { toolError, toolOk } from "../../xero/errors";
+@@ -10,7 +11,14 @@ export function registerOrgTools(
+ 	getClient: () => XeroClient,
+ 	getProps: () => Props,
+ 	setActiveTenant: (tenantId: string) => void | Promise<void>,
++	sources?: { clientGrant: () => string; upstream: () => string },
+ ) {
++	const scopeSets = () => {
++		const clientGrant = parseGrantedScopes(sources ? sources.clientGrant() : getProps().scopes);
++		const upstream = parseGrantedScopes(sources ? sources.upstream() : getProps().scopes);
++		return { clientGrant, upstream, effective: effectiveScopes(clientGrant, upstream) };
++	};
++
+ 	server.tool(
+ 		"xero_whoami",
+ 		"Return the authenticated Xero user identity, granted scopes, active organisation, and connection summary. Does not return tokens.",
+@@ -25,7 +33,7 @@ export function registerOrgTools(
+ 					name: props.name,
+ 					email: props.email,
+ 					scope_preset: props.scopePreset,
+-					scopes: props.scopes.split(/\s+/).filter(Boolean),
++					scopes: [...scopeSets().effective].sort(),
+ 					active_tenant_id: client.getActiveTenantId() ?? props.activeTenantId,
+ 					organisations: connections.map((c) => ({
+ 						tenant_id: c.tenantId,
+@@ -95,12 +103,16 @@ export function registerOrgTools(
+ 		async () => {
+ 			try {
+ 				const props = getProps();
+-				const grantedSet = parseGrantedScopes(props.scopes);
+-				const granted = [...grantedSet].sort();
+-				const availability = toolAvailability(grantedSet);
++				const sets = scopeSets();
++				const granted = [...sets.effective].sort();
++				const availability = toolAvailability(sets.effective);
++				const withheld = scopesWithheldFromClient(sets.clientGrant, sets.upstream);
+ 				return toolOk({
+ 					scopes: granted,
+ 					preset: props.scopePreset,
++					client_grant_scopes: [...sets.clientGrant].sort(),
++					upstream_token_scopes: [...sets.upstream].sort(),
++					withheld_from_this_client: withheld,
+ 					available_tools: availability.available,
+ 					unavailable_tools: availability.unavailable,
+ 					hint:
+-- 
+2.43.0
+
