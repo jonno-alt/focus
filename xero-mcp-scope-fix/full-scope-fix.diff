@@ -1,0 +1,1031 @@
+diff --git a/AGENTS.md b/AGENTS.md
+index f88ed81..221fd7d 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -95,7 +95,7 @@ MCP client
+ | Inputs | Zod; explicit amounts for money-moving tools |
+ | Outputs | Compact JSON; pagination via `src/xero/pagination.ts` |
+ | Errors | `src/xero/errors.ts` — never return secrets |
+-| Scopes | Add entries to `TOOL_SCOPE_MAP` when adding tools |
++| Scopes | Add entries to `TOOL_SCOPE_MAP` when adding tools; presets derive from it and `npm test` fails if a tool is unmapped |
+ 
+ ---
+ 
+diff --git a/README.md b/README.md
+index 268c978..81a0f5c 100644
+--- a/README.md
++++ b/README.md
+@@ -94,13 +94,18 @@ Point Xero redirect URI at `https://<worker>.workers.dev/callback`.
+ |-------|-----------|
+ | Consent preset | **Read only** (default) or **Read + write** |
+ | Xero scopes | Granular only (`accounting.invoices`, `.read` variants, report scopes, …) |
+-| Tool registration | Tool is registered only if granted scopes cover it |
++| Tool registration | Tool is registered only if granted scopes cover it; `list_granted_scopes` explains any hidden tool |
++| Preset derivation | Presets are derived from the tool map, so **Read + write** always covers every implemented tool and never asks for an unused scope |
+ | Tenant | `list_organisations` / `set_active_organisation`; every API call uses `xero-tenant-id` |
+ | Org role | Connected Xero user's role still limits data (pass-through) |
+ | Writes | Invoices/bills default to **DRAFT**; void/delete require `confirm: true` |
+ 
+ See [docs/SCOPES.md](docs/SCOPES.md) and [docs/SECURITY.md](docs/SECURITY.md).
+ 
++### Re-authorising after a scope change
++
++Deploying a scope change does not change an existing grant. Remove and re-add the server in the MCP client, choose **Read + write** on the consent page, approve at Xero, then run `list_granted_scopes` to confirm nothing is hidden. Every scope in the preset must also be enabled on the Xero app in the developer portal.
++
+ ## Typical agent flow
+ 
+ 1. `xero_whoami` / `list_organisations`  
+diff --git a/docs/LIMITATIONS.md b/docs/LIMITATIONS.md
+index bb2bfa7..ba1e330 100644
+--- a/docs/LIMITATIONS.md
++++ b/docs/LIMITATIONS.md
+@@ -24,7 +24,8 @@ System **Journals** extract (`GET /Journals`) may require premium tiers / approv
+ 
+ ## Identity & multi-tenant
+ 
+-- User must re-authorise to change scope pack (read → read+write).  
++- User must re-authorise to change scope pack (read → read+write), then reconnect the MCP client so it gets a fresh session; `list_granted_scopes` shows what is still hidden and why.  
++- Aged receivables/payables use Xero's *ByContact* reports, which require a `contact_id`.  
+ - Connections can be revoked in Xero; tools will fail until re-auth.  
+ - Custom Connection mode is documented as optional single-org deploy (`XERO_AUTH_MODE`) — primary path is multi-tenant web app OAuth.
+ 
+diff --git a/docs/SCOPES.md b/docs/SCOPES.md
+index 135f196..506e801 100644
+--- a/docs/SCOPES.md
++++ b/docs/SCOPES.md
+@@ -6,42 +6,55 @@ Official reference: [Xero OAuth 2.0 scopes](https://developer.xero.com/documenta
+ 
+ ## Consent presets
+ 
++### How presets are built
++
++Presets are **derived from `TOOL_SCOPE_MAP`** in `src/auth/scopes.ts`, not hand-listed:
++
++- **Read only** = the `.read` form of every scope any tool needs.
++- **Read + write** = every write scope any tool needs, plus the read scope of families that have no write tool (settings, reports). A `.read` scope whose write parent is requested is omitted because a Xero write scope includes read.
++
++Consequences enforced by `npm test`:
++
++- every implemented tool is registered under **Read + write**;
++- no scope is requested that no tool uses (so no `accounting.settings` write, no `accounting.reports.taxreports.read`);
++- **Read only** never contains a write scope.
++
++The consent page shows the exact scope list under each option.
++
+ ### Read only (`scope_preset=read`)
+ 
+ ```
+ openid profile email offline_access
++accounting.attachments.read
++accounting.banktransactions.read
+ accounting.contacts.read
+ accounting.invoices.read
+ accounting.payments.read
+-accounting.banktransactions.read
+-accounting.settings.read
+-accounting.attachments.read
+ accounting.reports.aged.read
+ accounting.reports.balancesheet.read
+ accounting.reports.banksummary.read
+ accounting.reports.executivesummary.read
+ accounting.reports.profitandloss.read
+ accounting.reports.trialbalance.read
+-accounting.reports.taxreports.read
++accounting.settings.read
+ ```
+ 
+ ### Read + write (`scope_preset=readwrite`)
+ 
+ ```
+ openid profile email offline_access
++accounting.attachments
++accounting.banktransactions
+ accounting.contacts
+ accounting.invoices
+ accounting.payments
+-accounting.banktransactions
+-accounting.settings
+-accounting.attachments
+ accounting.reports.aged.read
+ accounting.reports.balancesheet.read
+ accounting.reports.banksummary.read
+ accounting.reports.executivesummary.read
+ accounting.reports.profitandloss.read
+ accounting.reports.trialbalance.read
+-accounting.reports.taxreports.read
++accounting.settings.read
+ ```
+ 
+ Write scopes for a resource family imply the corresponding `.read` access for tool gating.
+@@ -53,7 +66,7 @@ Write scopes for a resource family imply the corresponding `.read` access for to
+ | `xero_whoami` | (session) | token claims + `/connections` |
+ | `list_organisations` | (session) | `GET /connections` |
+ | `set_active_organisation` | (session) | validates tenant |
+-| `list_granted_scopes` | (session) | props |
++| `list_granted_scopes` | (session) | props; also reports available / hidden tools |
+ | `list_contacts` / `get_contact` | `accounting.contacts.read` | `/Contacts` |
+ | `create_contact` / `update_contact` | `accounting.contacts` | `/Contacts` |
+ | `list_invoices` / `list_bills` / `get_invoice` | `accounting.invoices.read` | `/Invoices` |
+@@ -86,6 +99,20 @@ Write scopes for a resource family imply the corresponding `.read` access for to
+ | Journals `/Journals` | Premium / approval |
+ | Payroll, Assets, Projects, Files | Later phases |
+ 
++## Xero app configuration
++
++Xero only issues scopes that are enabled on the app in the [developer portal](https://developer.xero.com/app/manage). Every scope in the **Read + write** list above must be ticked on the app, or Xero rejects the authorisation with `invalid_scope`. Enabling a scope on the app does not grant it: the user still has to consent at Xero.
++
++## Changing scopes on an existing connection
++
++A scope change never widens an existing grant. After deploying a scope change:
++
++1. In the MCP client (Claude, ChatGPT, Inspector), disconnect / remove the server and add it again.
++2. On the consent page choose **Read + write**, then approve at Xero.
++3. Call `list_granted_scopes`: it lists `available_tools` and `unavailable_tools` with the scope each hidden tool needs.
++
++An old MCP session keeps the scope set it was issued with until the client reconnects; tools are registered once per session from that set.
++
+ ## Override
+ 
+-Advanced deploys may set secret/env `XERO_SCOPES_OVERRIDE` (space-separated) to replace the preset scope string. Prefer presets for least privilege.
++Advanced deploys may set secret/env `XERO_SCOPES_OVERRIDE` (space-separated) to replace the preset scope string for **both** presets. When it is set the consent page says so and shows the exact override, so a narrowed deployment cannot present itself as full read + write. Prefer presets for least privilege.
+diff --git a/docs/SECURITY.md b/docs/SECURITY.md
+index 148a732..9e76a1a 100644
+--- a/docs/SECURITY.md
++++ b/docs/SECURITY.md
+@@ -41,6 +41,8 @@ MCP clients **never** receive Xero access or refresh tokens.
+ | Destructive writes | `confirm: true` for void/delete |
+ | Safe defaults | Invoice/bill status defaults to `DRAFT` |
+ | Rate limits | Surface 429 + Retry-After; no silent scope widening |
++| Scope transparency | Consent page lists the exact scopes per preset and discloses any `XERO_SCOPES_OVERRIDE` |
++| Minimal write surface | Presets derive from the tool map: no write scope is requested for a family with no write tool (settings, reports) |
+ 
+ ## Threats & mitigations
+ 
+diff --git a/docs/TOOLS.md b/docs/TOOLS.md
+index 7c9a441..920246b 100644
+--- a/docs/TOOLS.md
++++ b/docs/TOOLS.md
+@@ -9,7 +9,7 @@ All tools return JSON text. Errors include `code`, optional `required_scope`, an
+ | `xero_whoami` | User, scopes, orgs (no tokens) |
+ | `list_organisations` | Authorised tenants |
+ | `set_active_organisation` | Set active `tenant_id` |
+-| `list_granted_scopes` | Scope list for this session |
++| `list_granted_scopes` | Scope list for this session, plus `available_tools` and `unavailable_tools` (with the scope each needs) |
+ 
+ ## Contacts
+ 
+diff --git a/package-lock.json b/package-lock.json
+index d9dda6b..0bae04b 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+ 	"name": "xero-mcp",
+-	"version": "0.1.0",
++	"version": "0.2.0",
+ 	"lockfileVersion": 3,
+ 	"requires": true,
+ 	"packages": {
+ 		"": {
+ 			"name": "xero-mcp",
+-			"version": "0.1.0",
++			"version": "0.2.0",
+ 			"dependencies": {
+ 				"@cloudflare/workers-oauth-provider": "^0.8.1",
+ 				"@modelcontextprotocol/sdk": "1.29.0",
+diff --git a/package.json b/package.json
+index 3ccb7e1..d7399b3 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+ 	"name": "xero-mcp",
+-	"version": "0.1.0",
++	"version": "0.2.0",
+ 	"license": "MIT",
+ 	"description": "Remote MCP server for Xero Accounting API — day-to-day AR, AP, banking, payments, and reports with permission-first OAuth.",
+ 	"scripts": {
+diff --git a/src/auth/scopes.test.ts b/src/auth/scopes.test.ts
+index f5363ba..21a023c 100644
+--- a/src/auth/scopes.test.ts
++++ b/src/auth/scopes.test.ts
+@@ -1,26 +1,101 @@
+ import { describe, expect, it } from "vitest";
+ import {
++	ALL_TOOL_SCOPES,
+ 	canRegisterTool,
+ 	hasScope,
++	IDENTITY_SCOPES,
++	isReadTool,
++	isWriteScope,
+ 	parseGrantedScopes,
++	READ_SCOPES,
++	READWRITE_SCOPES,
++	REPORT_SCOPES,
++	scopeBullets,
+ 	scopesForPreset,
++	scopeString,
++	TOOL_SCOPE_MAP,
++	toolAvailability,
++	WRITE_SCOPES,
+ } from "./scopes";
+ 
+-describe("scopes", () => {
++const ALL_TOOLS = Object.keys(TOOL_SCOPE_MAP);
++const WRITE_TOOLS = ALL_TOOLS.filter((t) => !isReadTool(t));
++const READ_TOOLS = ALL_TOOLS.filter((t) => isReadTool(t));
++
++describe("scope presets", () => {
+ 	it("read preset is least-privilege (no write scopes)", () => {
+ 		const scopes = scopesForPreset("read");
+ 		expect(scopes).toContain("accounting.invoices.read");
+-		expect(scopes).not.toContain("accounting.invoices");
+ 		expect(scopes).toContain("offline_access");
++		expect(scopes.filter(isWriteScope)).toEqual([]);
+ 	});
+ 
+-	it("readwrite includes write scopes and reports", () => {
++	it("readwrite preset requests every write scope any tool needs", () => {
+ 		const scopes = scopesForPreset("readwrite");
+-		expect(scopes).toContain("accounting.invoices");
+-		expect(scopes).toContain("accounting.payments");
++		for (const s of [
++			"accounting.contacts",
++			"accounting.invoices",
++			"accounting.payments",
++			"accounting.banktransactions",
++			"accounting.attachments",
++		]) {
++			expect(scopes, `missing ${s}`).toContain(s);
++		}
+ 		expect(scopes).toContain("accounting.reports.profitandloss.read");
++		expect(scopes).toContain("accounting.settings.read");
++	});
++
++	it("readwrite preset does not request write scopes no tool uses", () => {
++		// Settings tools are all reads: never ask for accounting.settings (write).
++		expect(READWRITE_SCOPES).not.toContain("accounting.settings");
++		for (const s of READWRITE_SCOPES) {
++			expect(ALL_TOOL_SCOPES, `${s} is requested but no tool needs it`).toContain(s);
++		}
++	});
++
++	it("presets contain no scope that no implemented tool needs", () => {
++		// e.g. accounting.reports.taxreports.read has no tool, so it must not be requested
++		const used = new Set(ALL_TOOL_SCOPES.map((s) => s.replace(/\.read$/, "")));
++		for (const preset of ["read", "readwrite"] as const) {
++			for (const s of scopesForPreset(preset)) {
++				if ((IDENTITY_SCOPES as readonly string[]).includes(s)) continue;
++				expect(used, `${preset} preset requests unused scope ${s}`).toContain(
++					s.replace(/\.read$/, ""),
++				);
++			}
++		}
++		expect(scopesForPreset("readwrite")).not.toContain("accounting.reports.taxreports.read");
++	});
++
++	it("readwrite omits .read scopes whose write parent is requested", () => {
++		for (const w of WRITE_SCOPES) {
++			expect(READWRITE_SCOPES).not.toContain(`${w}.read`);
++		}
++	});
++
++	it("report scopes are read-only and all present in both presets", () => {
++		expect(REPORT_SCOPES.length).toBeGreaterThan(0);
++		for (const r of REPORT_SCOPES) {
++			expect(r.endsWith(".read")).toBe(true);
++			expect(scopesForPreset("read")).toContain(r);
++			expect(scopesForPreset("readwrite")).toContain(r);
++		}
++	});
++
++	it("scopeString honours override verbatim and falls back to preset", () => {
++		expect(scopeString("readwrite", "  openid   accounting.invoices ")).toBe(
++			"openid accounting.invoices",
++		);
++		expect(scopeString("read")).toBe(scopesForPreset("read").join(" "));
++	});
++
++	it("consent bullets exist for both presets", () => {
++		expect(scopeBullets("read").length).toBeGreaterThan(3);
++		expect(scopeBullets("readwrite").length).toBeGreaterThan(3);
+ 	});
++});
+ 
++describe("scope gating", () => {
+ 	it("write scope satisfies .read requirement", () => {
+ 		const granted = parseGrantedScopes("accounting.invoices offline_access");
+ 		expect(hasScope(granted, "accounting.invoices.read")).toBe(true);
+@@ -28,17 +103,51 @@ describe("scopes", () => {
+ 		expect(hasScope(granted, "accounting.payments")).toBe(false);
+ 	});
+ 
+-	it("gates tools by scope map", () => {
+-		const readOnly = parseGrantedScopes(
+-			scopesForPreset("read").join(" "),
+-		);
+-		expect(canRegisterTool("list_invoices", readOnly)).toBe(true);
+-		expect(canRegisterTool("create_invoice", readOnly)).toBe(false);
+-		expect(canRegisterTool("xero_whoami", readOnly)).toBe(true);
+-		expect(canRegisterTool("get_profit_and_loss", readOnly)).toBe(true);
++	it("read scope never satisfies a write requirement", () => {
++		const granted = parseGrantedScopes("accounting.contacts.read");
++		expect(hasScope(granted, "accounting.contacts")).toBe(false);
++		expect(canRegisterTool("create_contact", granted)).toBe(false);
++		expect(canRegisterTool("list_contacts", granted)).toBe(true);
++	});
+ 
++	it("unknown tool names never register", () => {
++		expect(canRegisterTool("not_a_tool", parseGrantedScopes(scopesForPreset("readwrite").join(" ")))).toBe(false);
++	});
++
++	it("read preset exposes exactly the read tools", () => {
++		const readOnly = parseGrantedScopes(scopesForPreset("read").join(" "));
++		for (const t of READ_TOOLS) expect(canRegisterTool(t, readOnly), t).toBe(true);
++		for (const t of WRITE_TOOLS) expect(canRegisterTool(t, readOnly), t).toBe(false);
++		expect(WRITE_TOOLS).toContain("create_contact");
++		expect(WRITE_TOOLS).toContain("create_invoice");
++		expect(READ_TOOLS).toContain("get_profit_and_loss");
++		expect(READ_TOOLS).toContain("xero_whoami");
++	});
++
++	it("readwrite preset exposes EVERY tool in the catalog", () => {
+ 		const rw = parseGrantedScopes(scopesForPreset("readwrite").join(" "));
+-		expect(canRegisterTool("create_invoice", rw)).toBe(true);
+-		expect(canRegisterTool("create_payment", rw)).toBe(true);
++		const { available, unavailable } = toolAvailability(rw);
++		expect(unavailable).toEqual([]);
++		expect(available.sort()).toEqual([...ALL_TOOLS].sort());
++	});
++
++	it("create_contact becomes available exactly when accounting.contacts is granted", () => {
++		expect(canRegisterTool("create_contact", parseGrantedScopes("accounting.contacts"))).toBe(true);
++		expect(canRegisterTool("update_contact", parseGrantedScopes("accounting.contacts"))).toBe(true);
++		expect(canRegisterTool("create_contact", parseGrantedScopes("accounting.contacts.read accounting.invoices"))).toBe(false);
++	});
++
++	it("explains hidden tools for a narrow grant (the pre-fix live grant)", () => {
++		const narrow = parseGrantedScopes(
++			"openid profile email offline_access accounting.contacts.read accounting.invoices accounting.settings.read",
++		);
++		const { available, unavailable } = toolAvailability(narrow);
++		expect(available).toContain("create_invoice");
++		expect(available).toContain("list_bills");
++		expect(available).not.toContain("create_contact");
++		const hidden = unavailable.find((u) => u.tool === "create_contact");
++		expect(hidden?.requires_any_of).toEqual(["accounting.contacts"]);
++		expect(unavailable.map((u) => u.tool)).toContain("list_payments");
++		expect(unavailable.map((u) => u.tool)).toContain("get_profit_and_loss");
+ 	});
+ });
+diff --git a/src/auth/scopes.ts b/src/auth/scopes.ts
+index 3cf82c4..f472180 100644
+--- a/src/auth/scopes.ts
++++ b/src/auth/scopes.ts
+@@ -2,6 +2,13 @@
+  * Xero granular OAuth scopes (required for apps created on/after 2026-03-02).
+  * Broad scopes `accounting.transactions` and `accounting.reports.read` are deprecated.
+  *
++ * Design rule: TOOL_SCOPE_MAP is the single source of truth. The consent presets
++ * (`read` and `readwrite`) are DERIVED from it, so:
++ *   - "Read + write" always requests exactly the scopes needed by every implemented tool;
++ *   - no scope is requested that no tool uses;
++ *   - a tool can never be implemented but unreachable under the readwrite preset.
++ * `npm test` enforces these invariants.
++ *
+  * @see https://developer.xero.com/documentation/guides/oauth2/scopes/
+  */
+ 
+@@ -13,91 +20,8 @@ export const IDENTITY_SCOPES = [
+ 	"offline_access",
+ ] as const;
+ 
+-/** Read-only accounting scopes for day-to-day reporting and inspection */
+-export const READ_SCOPES = [
+-	"accounting.contacts.read",
+-	"accounting.invoices.read",
+-	"accounting.payments.read",
+-	"accounting.banktransactions.read",
+-	"accounting.settings.read",
+-	"accounting.attachments.read",
+-	"accounting.reports.aged.read",
+-	"accounting.reports.balancesheet.read",
+-	"accounting.reports.banksummary.read",
+-	"accounting.reports.executivesummary.read",
+-	"accounting.reports.profitandloss.read",
+-	"accounting.reports.trialbalance.read",
+-	"accounting.reports.taxreports.read",
+-] as const;
+-
+-/**
+- * Write scopes (include read capability for the same resource family).
+- * Xero write scopes typically supersede `.read` for that family.
+- */
+-export const WRITE_SCOPES = [
+-	"accounting.contacts",
+-	"accounting.invoices",
+-	"accounting.payments",
+-	"accounting.banktransactions",
+-	"accounting.settings",
+-	"accounting.attachments",
+-] as const;
+-
+-/** Report scopes are read-only by design */
+-export const REPORT_SCOPES = [
+-	"accounting.reports.aged.read",
+-	"accounting.reports.balancesheet.read",
+-	"accounting.reports.banksummary.read",
+-	"accounting.reports.executivesummary.read",
+-	"accounting.reports.profitandloss.read",
+-	"accounting.reports.trialbalance.read",
+-	"accounting.reports.taxreports.read",
+-] as const;
+-
+ export type ScopePreset = "read" | "readwrite";
+ 
+-export function scopesForPreset(preset: ScopePreset): string[] {
+-	if (preset === "read") {
+-		return [...IDENTITY_SCOPES, ...READ_SCOPES];
+-	}
+-	// readwrite: write scopes + report scopes + identity
+-	return [...IDENTITY_SCOPES, ...WRITE_SCOPES, ...REPORT_SCOPES];
+-}
+-
+-export function scopeString(preset: ScopePreset, override?: string): string {
+-	if (override?.trim()) {
+-		return override.trim().split(/\s+/).join(" ");
+-	}
+-	return scopesForPreset(preset).join(" ");
+-}
+-
+-/**
+- * Human-readable bullets shown on the consent screen.
+- */
+-export function scopeBullets(preset: ScopePreset): string[] {
+-	if (preset === "read") {
+-		return [
+-			"View contacts (customers and suppliers)",
+-			"View invoices, bills, credit notes, quotes, and purchase orders",
+-			"View payments, overpayments, and prepayments",
+-			"View bank transactions and transfers",
+-			"View chart of accounts, tax rates, and settings needed to understand books",
+-			"View financial reports (P&L, balance sheet, trial balance, aged AR/AP, bank summary)",
+-			"View document attachments",
+-		];
+-	}
+-	return [
+-		"Create and update contacts",
+-		"Create and update invoices, bills, credit notes, quotes, and purchase orders",
+-		"Record and delete payments (cash application)",
+-		"Create bank transactions and transfers",
+-		"View and use chart of accounts, tax rates, and tracking categories",
+-		"View financial reports (P&L, balance sheet, trial balance, aged AR/AP, bank summary)",
+-		"Upload and view document attachments",
+-		"Note: writes default to DRAFT where possible; destructive actions require explicit confirmation",
+-	];
+-}
+-
+ /**
+  * Tool → required scopes. A tool is registered if the user has ANY listed
+  * alternative (e.g. write scope satisfies read tools for that family).
+@@ -107,28 +31,7 @@ export type ScopeRequirement = {
+ 	anyOf: string[];
+ };
+ 
+-/** True if granted scopes include `required` or its write parent (strip .read). */
+-export function hasScope(granted: Set<string>, required: string): boolean {
+-	if (granted.has(required)) return true;
+-	// write scope implies read
+-	if (required.endsWith(".read")) {
+-		const write = required.replace(/\.read$/, "");
+-		if (granted.has(write)) return true;
+-	}
+-	// accounting.reports.* are already .read only
+-	return false;
+-}
+-
+-export function hasAnyScope(granted: Set<string>, anyOf: string[]): boolean {
+-	return anyOf.some((s) => hasScope(granted, s));
+-}
+-
+-export function parseGrantedScopes(scopeStringValue: string | undefined | null): Set<string> {
+-	if (!scopeStringValue) return new Set();
+-	return new Set(scopeStringValue.split(/\s+/).filter(Boolean));
+-}
+-
+-/** Tool catalog for gating */
++/** Tool catalog for gating. Every tool registered in src/mcp/tools/* MUST appear here. */
+ export const TOOL_SCOPE_MAP: Record<string, ScopeRequirement> = {
+ 	// Always available once authenticated
+ 	xero_whoami: { anyOf: [] },
+@@ -181,14 +84,14 @@ export const TOOL_SCOPE_MAP: Record<string, ScopeRequirement> = {
+ 	list_bank_transfers: { anyOf: ["accounting.banktransactions.read"] },
+ 	create_bank_transfer: { anyOf: ["accounting.banktransactions"] },
+ 
+-	// Settings
++	// Settings (all read-only tools: no settings write scope is ever requested)
+ 	list_accounts: { anyOf: ["accounting.settings.read"] },
+ 	list_tax_rates: { anyOf: ["accounting.settings.read"] },
+ 	list_tracking_categories: { anyOf: ["accounting.settings.read"] },
+ 	list_currencies: { anyOf: ["accounting.settings.read"] },
+ 	get_organisation: { anyOf: ["accounting.settings.read"] },
+ 
+-	// Reports
++	// Reports (read-only by design)
+ 	get_profit_and_loss: { anyOf: ["accounting.reports.profitandloss.read"] },
+ 	get_balance_sheet: { anyOf: ["accounting.reports.balancesheet.read"] },
+ 	get_trial_balance: { anyOf: ["accounting.reports.trialbalance.read"] },
+@@ -202,9 +105,137 @@ export const TOOL_SCOPE_MAP: Record<string, ScopeRequirement> = {
+ 	upload_attachment: { anyOf: ["accounting.attachments"] },
+ };
+ 
++/** `accounting.contacts` → `accounting.contacts.read`; `.read` scopes unchanged. */
++export function toReadScope(scope: string): string {
++	return scope.endsWith(".read") ? scope : `${scope}.read`;
++}
++
++/** True for a Xero write scope (no `.read` suffix, not identity). */
++export function isWriteScope(scope: string): boolean {
++	return scope.startsWith("accounting.") && !scope.endsWith(".read");
++}
++
++function sortedUnique(values: Iterable<string>): string[] {
++	return [...new Set(values)].sort();
++}
++
++/** Every scope referenced by any tool, exactly as written in the map. */
++export const ALL_TOOL_SCOPES: readonly string[] = sortedUnique(
++	Object.values(TOOL_SCOPE_MAP).flatMap((r) => r.anyOf),
++);
++
++/** Read-only accounting scopes: the `.read` form of every scope any tool needs. */
++export const READ_SCOPES: readonly string[] = sortedUnique(ALL_TOOL_SCOPES.map(toReadScope));
++
++/** Write scopes needed by at least one write tool (write implies read for that family). */
++export const WRITE_SCOPES: readonly string[] = ALL_TOOL_SCOPES.filter(isWriteScope);
++
++/** Report scopes are read-only by design. */
++export const REPORT_SCOPES: readonly string[] = READ_SCOPES.filter((s) =>
++	s.startsWith("accounting.reports."),
++);
++
++/**
++ * Read + write preset: every write scope any tool needs, plus the read scopes of
++ * families that have no write tool (e.g. settings, reports). Read scopes whose write
++ * parent is already requested are omitted because Xero write scopes include read.
++ */
++export const READWRITE_SCOPES: readonly string[] = sortedUnique(
++	ALL_TOOL_SCOPES.filter((s) => {
++		if (isWriteScope(s)) return true;
++		const parent = s.replace(/\.read$/, "");
++		return !WRITE_SCOPES.includes(parent);
++	}),
++);
++
++export function scopesForPreset(preset: ScopePreset): string[] {
++	if (preset === "read") {
++		return [...IDENTITY_SCOPES, ...READ_SCOPES];
++	}
++	return [...IDENTITY_SCOPES, ...READWRITE_SCOPES];
++}
++
++export function scopeString(preset: ScopePreset, override?: string): string {
++	if (override?.trim()) {
++		return override.trim().split(/\s+/).join(" ");
++	}
++	return scopesForPreset(preset).join(" ");
++}
++
++/**
++ * Human-readable bullets shown on the consent screen.
++ */
++export function scopeBullets(preset: ScopePreset): string[] {
++	if (preset === "read") {
++		return [
++			"View contacts (customers and suppliers)",
++			"View invoices, bills, credit notes, quotes, purchase orders, repeating invoices and items",
++			"View payments, batch payments, overpayments, and prepayments",
++			"View bank transactions and transfers",
++			"View chart of accounts, tax rates, tracking categories, currencies and organisation details",
++			"View financial reports (P&L, balance sheet, trial balance, executive summary, aged AR/AP, bank summary)",
++			"View document attachments",
++		];
++	}
++	return [
++		"Create and update contacts",
++		"Create, update and email invoices; create and update bills; create credit notes, quotes and purchase orders",
++		"Record and delete payments, create batch payments, allocate credit notes, overpayments and prepayments",
++		"Create and update bank transactions and transfers",
++		"View chart of accounts, tax rates, tracking categories, currencies and organisation details (read only)",
++		"View financial reports (P&L, balance sheet, trial balance, executive summary, aged AR/AP, bank summary)",
++		"Upload and view document attachments",
++		"Note: writes default to DRAFT where possible; destructive actions require explicit confirmation",
++	];
++}
++
++/** True if granted scopes include `required` or its write parent (strip .read). */
++export function hasScope(granted: Set<string>, required: string): boolean {
++	if (granted.has(required)) return true;
++	// write scope implies read
++	if (required.endsWith(".read")) {
++		const write = required.replace(/\.read$/, "");
++		if (granted.has(write)) return true;
++	}
++	// accounting.reports.* are already .read only
++	return false;
++}
++
++export function hasAnyScope(granted: Set<string>, anyOf: string[]): boolean {
++	return anyOf.some((s) => hasScope(granted, s));
++}
++
++export function parseGrantedScopes(scopeStringValue: string | undefined | null): Set<string> {
++	if (!scopeStringValue) return new Set();
++	return new Set(scopeStringValue.split(/\s+/).filter(Boolean));
++}
++
+ export function canRegisterTool(toolName: string, granted: Set<string>): boolean {
+ 	const req = TOOL_SCOPE_MAP[toolName];
+ 	if (!req) return false;
+ 	if (req.anyOf.length === 0) return true;
+ 	return hasAnyScope(granted, req.anyOf);
+ }
++
++/** True if the tool's requirement is satisfiable with read-only scopes. */
++export function isReadTool(toolName: string): boolean {
++	const req = TOOL_SCOPE_MAP[toolName];
++	if (!req) return false;
++	return req.anyOf.length === 0 || req.anyOf.some((s) => !isWriteScope(s));
++}
++
++export type ToolAvailability = {
++	available: string[];
++	unavailable: { tool: string; requires_any_of: string[] }[];
++};
++
++/** Which catalog tools a set of granted scopes exposes, and why the rest are hidden. */
++export function toolAvailability(granted: Set<string>): ToolAvailability {
++	const available: string[] = [];
++	const unavailable: ToolAvailability["unavailable"] = [];
++	for (const [tool, req] of Object.entries(TOOL_SCOPE_MAP)) {
++		if (canRegisterTool(tool, granted)) available.push(tool);
++		else unavailable.push({ tool, requires_any_of: req.anyOf });
++	}
++	return { available, unavailable };
++}
+diff --git a/src/auth/xero-handler.ts b/src/auth/xero-handler.ts
+index c04f928..7997e5d 100644
+--- a/src/auth/xero-handler.ts
++++ b/src/auth/xero-handler.ts
+@@ -5,6 +5,7 @@ import type { Props, XeroConnection } from "./props";
+ import {
+ 	type ScopePreset,
+ 	scopeBullets,
++	scopesForPreset,
+ 	scopeString,
+ } from "./scopes";
+ import {
+@@ -292,6 +293,21 @@ function renderXeroConsentDialog(
+ 	const writeBullets = scopeBullets("readwrite")
+ 		.map((b) => `<li>${sanitizeText(b)}</li>`)
+ 		.join("");
++	const scopeList = (preset: ScopePreset) =>
++		scopesForPreset(preset)
++			.map((s) => `<code>${sanitizeText(s)}</code>`)
++			.join(" ");
++	// An override replaces BOTH presets with one fixed scope string. Say so, so a
++	// narrowed deployment can never present itself as full "Read + write".
++	const override = env.XERO_SCOPES_OVERRIDE?.trim();
++	const overrideNotice = override
++		? `<div class="warn"><strong>Deployment override active.</strong> This server is configured with
++		<code>XERO_SCOPES_OVERRIDE</code>, so whichever option you pick, Xero will be asked for exactly:
++		${override
++			.split(/\s+/)
++			.map((s) => `<code>${sanitizeText(s)}</code>`)
++			.join(" ")}</div>`
++		: "";
+ 
+ 	const html = `<!DOCTYPE html>
+ <html lang="en">
+@@ -315,6 +331,9 @@ function renderXeroConsentDialog(
+     button { padding:.7rem 1.25rem; border-radius:8px; font-size:1rem; cursor:pointer; }
+     .primary { background:var(--primary); color:#fff; border:none; font-weight:600; }
+     .secondary { background:transparent; border:1px solid var(--border); }
++    .scopes { font-size:.8rem; line-height:1.9; color:var(--muted); }
++    code { background:#f4f4f5; padding:.1rem .3rem; border-radius:4px; }
++    details { margin-top:.5rem; font-size:.85rem; }
+     .warn { font-size:.85rem; color:#92400e; background:#fffbeb; border:1px solid #fcd34d; border-radius:8px; padding:.75rem; margin-top:1rem; }
+   </style>
+ </head>
+@@ -336,12 +355,15 @@ function renderXeroConsentDialog(
+           <input type="radio" name="scope_preset" value="read" checked/>
+           <strong>Read only</strong> — reports, lists, and inspection (recommended default)
+           <ul>${readBullets}</ul>
++          <details><summary>Exact Xero scopes requested</summary><p class="scopes">${scopeList("read")}</p></details>
+         </label>
+         <label class="preset">
+           <input type="radio" name="scope_preset" value="readwrite"/>
+-          <strong>Read + write</strong> — create/update invoices, bills, payments, bank transactions
++          <strong>Read + write</strong> — every permission needed by every tool this server implements
+           <ul>${writeBullets}</ul>
++          <details><summary>Exact Xero scopes requested</summary><p class="scopes">${scopeList("readwrite")}</p></details>
+         </label>
++        ${overrideNotice}
+         <div class="warn">
+           Accounting data is sensitive. Prefer <strong>Read only</strong> unless the agent must create or change transactions.
+           Writes default to DRAFT where possible; destructive actions require explicit confirmation in tools.
+diff --git a/src/index.ts b/src/index.ts
+index 4a5e4ce..76d44f2 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -21,7 +21,7 @@ type SessionTokens = {
+ export class XeroMCP extends McpAgent<Env, Record<string, never>, Props> {
+ 	server = new McpServer({
+ 		name: "xero-mcp",
+-		version: "0.1.0",
++		version: "0.2.0",
+ 	});
+ 
+ 	private session: SessionTokens | null = null;
+diff --git a/src/mcp/register-tools.test.ts b/src/mcp/register-tools.test.ts
+new file mode 100644
+index 0000000..aa9718c
+--- /dev/null
++++ b/src/mcp/register-tools.test.ts
+@@ -0,0 +1,153 @@
++import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
++import { describe, expect, it } from "vitest";
++import type { Props } from "../auth/props";
++import { isReadTool, scopesForPreset, TOOL_SCOPE_MAP } from "../auth/scopes";
++import type { XeroClient } from "../xero/client";
++import { registerAllTools } from "./register-tools";
++
++/**
++ * Registration tests: run the REAL tool registrars against a fake McpServer that
++ * records every tool name, so "implemented but never registered" cannot slip through.
++ */
++
++function fakeServer() {
++	const names: string[] = [];
++	const server = {
++		tool(name: string, ..._rest: unknown[]) {
++			names.push(name);
++			return server;
++		},
++	};
++	return { server: server as unknown as McpServer, names };
++}
++
++function propsWithScopes(scopes: string): Props {
++	return {
++		login: "u",
++		name: "User",
++		email: "u@example.com",
++		accessToken: "redacted",
++		refreshToken: "redacted",
++		expiresAt: Date.now() + 60_000,
++		scopes,
++		connections: [],
++		activeTenantId: null,
++		scopePreset: "read",
++	};
++}
++
++function register(scopes: string) {
++	const { server, names } = fakeServer();
++	const result = registerAllTools(
++		server,
++		() => ({}) as unknown as XeroClient,
++		() => propsWithScopes(scopes),
++		async () => {},
++	);
++	return { names, result };
++}
++
++const CATALOG = Object.keys(TOOL_SCOPE_MAP).sort();
++
++describe("registerAllTools", () => {
++	it("every implemented tool has a scope entry, and every scope entry has an implementation", () => {
++		const { result } = register(scopesForPreset("readwrite").join(" "));
++		expect(result.unmapped).toEqual([]);
++		const implemented = [...result.registered, ...result.skipped].sort();
++		expect(implemented).toEqual(CATALOG);
++	});
++
++	it("readwrite grant registers every implemented tool, including create_contact", () => {
++		const { names, result } = register(scopesForPreset("readwrite").join(" "));
++		expect(result.skipped).toEqual([]);
++		expect(names.sort()).toEqual(CATALOG);
++		for (const t of [
++			"list_contacts",
++			"get_contact",
++			"create_contact",
++			"update_contact",
++			"list_invoices",
++			"get_invoice",
++			"create_invoice",
++			"update_invoice",
++			"email_invoice",
++			"list_bills",
++			"create_bill",
++			"update_bill",
++			"list_credit_notes",
++			"create_credit_note",
++			"allocate_credit_note",
++			"list_quotes",
++			"create_quote",
++			"list_purchase_orders",
++			"create_purchase_order",
++			"list_payments",
++			"create_payment",
++			"delete_payment",
++			"create_batch_payment",
++			"allocate_overpayment",
++			"allocate_prepayment",
++			"list_bank_transactions",
++			"create_bank_transaction",
++			"update_bank_transaction",
++			"list_bank_transfers",
++			"create_bank_transfer",
++			"list_accounts",
++			"list_tax_rates",
++			"get_organisation",
++			"get_profit_and_loss",
++			"get_balance_sheet",
++			"get_trial_balance",
++			"get_executive_summary",
++			"get_bank_summary",
++			"get_aged_receivables",
++			"get_aged_payables",
++			"list_attachments",
++			"upload_attachment",
++		]) {
++			expect(names, `${t} should be registered`).toContain(t);
++		}
++	});
++
++	it("read grant registers only read tools and never a write tool", () => {
++		const { names } = register(scopesForPreset("read").join(" "));
++		const expected = CATALOG.filter(isReadTool);
++		expect(names.sort()).toEqual(expected);
++		for (const t of names) expect(isReadTool(t), `${t} is a write tool`).toBe(true);
++		expect(names).not.toContain("create_contact");
++		expect(names).not.toContain("create_invoice");
++		expect(names).not.toContain("delete_payment");
++	});
++
++	it("no scopes at all still registers the session tools only", () => {
++		const { names } = register("openid profile email offline_access");
++		expect(names.sort()).toEqual(
++			["xero_whoami", "list_organisations", "set_active_organisation", "list_granted_scopes"].sort(),
++		);
++	});
++
++	it("reproduces the narrow pre-fix live grant: 17 tools, no create_contact", () => {
++		const { names, result } = register(
++			"openid profile email accounting.contacts.read accounting.invoices accounting.settings.read offline_access",
++		);
++		expect(names).not.toContain("create_contact");
++		expect(names).toContain("create_invoice");
++		expect(names).toContain("list_bills");
++		expect(names).toContain("create_credit_note");
++		expect(result.skipped).toContain("create_contact");
++		expect(result.skipped).toContain("list_payments");
++	});
++
++	it("removes the scope gate from server.tool after registration", () => {
++		const { server, names } = fakeServer();
++		registerAllTools(
++			server,
++			() => ({}) as unknown as XeroClient,
++			() => propsWithScopes(""),
++			async () => {},
++		);
++		// After registration the gate must be gone: an unmapped name reaches the real method.
++		server.tool("later_registered_tool", "desc", {}, async () => ({ content: [] }));
++		expect(names).toContain("later_registered_tool");
++	});
++});
+diff --git a/src/mcp/register-tools.ts b/src/mcp/register-tools.ts
+index 1c9d173..ad82142 100644
+--- a/src/mcp/register-tools.ts
++++ b/src/mcp/register-tools.ts
+@@ -1,6 +1,6 @@
+ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+ import type { Props } from "../auth/props";
+-import { canRegisterTool, parseGrantedScopes } from "../auth/scopes";
++import { canRegisterTool, parseGrantedScopes, TOOL_SCOPE_MAP } from "../auth/scopes";
+ import type { XeroClient } from "../xero/client";
+ import { registerAttachmentTools } from "./tools/attachments";
+ import { registerBankTools } from "./tools/bank";
+@@ -11,6 +11,15 @@ import { registerPaymentTools } from "./tools/payments";
+ import { registerReportTools } from "./tools/reports";
+ import { registerSettingsTools } from "./tools/settings";
+ 
++export type RegistrationResult = {
++	/** Tools exposed to the MCP client for this session */
++	registered: string[];
++	/** Tools hidden because the session lacks a required scope */
++	skipped: string[];
++	/** Tools implemented in code but missing from TOOL_SCOPE_MAP (always a bug) */
++	unmapped: string[];
++};
++
+ /**
+  * Register tools, filtering by granted Xero scopes.
+  * Org/session tools always register.
+@@ -23,15 +32,24 @@ export function registerAllTools(
+ 	getClient: () => XeroClient,
+ 	getProps: () => Props,
+ 	setActiveTenant: (tenantId: string) => void | Promise<void>,
+-) {
++): RegistrationResult {
+ 	const granted = parseGrantedScopes(getProps().scopes);
++	const result: RegistrationResult = { registered: [], skipped: [], unmapped: [] };
+ 
+ 	const originalTool = server.tool.bind(server);
+ 	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 	(server as any).tool = (name: string, ...rest: unknown[]) => {
++		if (!(name in TOOL_SCOPE_MAP)) {
++			// Fail loud (but not fatal): a tool without a scope entry can never be exposed.
++			console.error(`xero-mcp: tool "${name}" is not in TOOL_SCOPE_MAP and will not be registered`);
++			result.unmapped.push(name);
++			return server;
++		}
+ 		if (!canRegisterTool(name, granted)) {
++			result.skipped.push(name);
+ 			return server;
+ 		}
++		result.registered.push(name);
+ 		// @ts-expect-error rest spread matches overloads
+ 		return originalTool(name, ...rest);
+ 	};
+@@ -50,4 +68,6 @@ export function registerAllTools(
+ 		// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 		(server as any).tool = originalTool;
+ 	}
++
++	return result;
+ }
+diff --git a/src/mcp/tools/org.ts b/src/mcp/tools/org.ts
+index be79cdc..50e3b25 100644
+--- a/src/mcp/tools/org.ts
++++ b/src/mcp/tools/org.ts
+@@ -1,6 +1,6 @@
+ import { z } from "zod";
+ import type { Props } from "../../auth/props";
+-import { parseGrantedScopes } from "../../auth/scopes";
++import { parseGrantedScopes, toolAvailability } from "../../auth/scopes";
+ import type { XeroClient } from "../../xero/client";
+ import { toolError, toolOk } from "../../xero/errors";
+ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+@@ -90,13 +90,24 @@ export function registerOrgTools(
+ 
+ 	server.tool(
+ 		"list_granted_scopes",
+-		"List OAuth scopes granted by the user for this session. Useful to know which tools are available.",
++		"List OAuth scopes granted by the user for this session, which tools they expose, and which tools are hidden and why.",
+ 		{},
+ 		async () => {
+ 			try {
+ 				const props = getProps();
+-				const granted = [...parseGrantedScopes(props.scopes)].sort();
+-				return toolOk({ scopes: granted, preset: props.scopePreset });
++				const grantedSet = parseGrantedScopes(props.scopes);
++				const granted = [...grantedSet].sort();
++				const availability = toolAvailability(grantedSet);
++				return toolOk({
++					scopes: granted,
++					preset: props.scopePreset,
++					available_tools: availability.available,
++					unavailable_tools: availability.unavailable,
++					hint:
++						availability.unavailable.length > 0
++							? "Hidden tools need a Xero scope this session was not granted. Re-authorise with the Read + write preset at Xero, then disconnect and reconnect this MCP server in your client so it receives a fresh session."
++							: "All implemented tools are available for this session.",
++				});
+ 			} catch (e) {
+ 				return toolError(e);
+ 			}
+diff --git a/src/mcp/tools/reports.ts b/src/mcp/tools/reports.ts
+index 4e13b26..e3d4583 100644
+--- a/src/mcp/tools/reports.ts
++++ b/src/mcp/tools/reports.ts
+@@ -163,7 +163,7 @@ export function registerReportTools(server: McpServer, getClient: () => XeroClie
+ 		"Aged Receivables by Contact. Requires accounting.reports.aged.read.",
+ 		{
+ 			tenant_id: z.string().uuid().optional(),
+-			contact_id: z.string().uuid().optional().describe("Filter to one contact"),
++			contact_id: z.string().uuid().optional().describe("ContactID. Xero requires it for the by-contact aged report."),
+ 			date: z.string().optional(),
+ 			from_date: z.string().optional(),
+ 			to_date: z.string().optional(),
+@@ -191,7 +191,7 @@ export function registerReportTools(server: McpServer, getClient: () => XeroClie
+ 		"Aged Payables by Contact. Requires accounting.reports.aged.read.",
+ 		{
+ 			tenant_id: z.string().uuid().optional(),
+-			contact_id: z.string().uuid().optional(),
++			contact_id: z.string().uuid().optional().describe("ContactID. Xero requires it for the by-contact aged report."),
+ 			date: z.string().optional(),
+ 			from_date: z.string().optional(),
+ 			to_date: z.string().optional(),
