@@ -1,11 +1,11 @@
-# Cash flow pack, 1 October 2026
+# Cash flow pack, 1 October 2026 (pointer only)
 
-This folder holds the 30-day cash plan for Consult Clarity and every draft that goes with it.
+A 30-day cash flow plan and a full draft pack (collections, renewals, live proposals, participant and anniversary emails, bureau follow-ups, LinkedIn messages and posts, written offers, a Xero invoice pack and read-only findings from Xero, Airtable, Gmail, Calendar, Drive, the website and the ad channels) was prepared on 1 October 2026.
 
-- 30-DAY-CASH-PLAN.md is the plan. Start there. It takes about 8 minutes to read.
-- drafts/ holds every email, LinkedIn message, post, written offer and the Xero invoice pack. Each file has a header saying who it is for, what money it moves, the evidence used, whether a Gmail draft exists, and how long it takes to send.
-- findings/ holds the read-only sweeps of Xero, Airtable, Gmail, Calendar, Drive, the website and the marketing channels that the plan was built from.
+This repository is public, so the pack itself is not stored here. It contains client names, amounts and email drafts (P2 client confidential).
 
-Nothing in this folder has been sent, invoiced, published or changed in any system. Gmail drafts were created only where no unsent draft to the same person already existed.
+Where the pack lives:
+- IDrive E2 bucket cgg-ai-files-2026, prefix chat-outputs/cash-flow-plan/2026-10-01-v1/ (30-DAY-CASH-PLAN.md, DRAFTS-INDEX.md, MANIFEST.json and cash-flow-plan-2026-10-01.tar.gz with every draft and findings file).
+- Airtable Work Receipts (Core Ops base), Receipt Key cash-flow-30-day-plan-2026-10-01.
 
-Privacy: P2 client confidential. Business contacts and amounts only. Personal addresses are written as [email on file]. Bank account numbers and personal items are excluded.
+Nothing in the pack has been sent, invoiced, published or changed in any system. Gmail drafts were created only where no unsent draft to the same person already existed.
