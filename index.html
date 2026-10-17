@@ -431,10 +431,15 @@ function storeKey(key) {
 
 // ── INIT ──
 function init() {
-  // Check URL hash for token (persists in bookmarks/home screen)
-  const hash = window.location.hash.slice(1);
-  const params = new URLSearchParams(hash);
-  apiKey = params.get('token') || getStoredKey() || '';
+  // One-time migration: older links carried the token in the URL hash.
+  // Move it into storage and wipe it from the address bar and history.
+  const params = new URLSearchParams(window.location.hash.slice(1));
+  const hashToken = params.get('token');
+  if (hashToken) {
+    storeKey(hashToken);
+    history.replaceState(null, '', window.location.pathname + window.location.search);
+  }
+  apiKey = hashToken || getStoredKey() || '';
 
   if (apiKey) {
     document.getElementById('setup-screen').style.display = 'none';
@@ -453,8 +458,6 @@ function saveApiKey() {
   }
   apiKey = key;
   storeKey(key);
-  // Save token in URL hash so it persists in bookmarks/home screen
-  window.location.hash = 'token=' + encodeURIComponent(key);
   document.getElementById('setup-screen').style.display = 'none';
   showLoading();
   syncTasks();
@@ -475,6 +478,15 @@ async function airtableFetch(endpoint, options = {}) {
       ...(options.headers || {})
     }
   });
+  if (res.status === 401) {
+    // Token revoked or rotated: forget it and ask for the new one.
+    try { window.localStorage?.removeItem('focus_airtable_key'); } catch(e) {}
+    apiKey = '';
+    document.getElementById('loading-screen').style.display = 'none';
+    document.getElementById('setup-screen').style.display = 'flex';
+    document.getElementById('setup-error').textContent = 'Token no longer works. Paste your new token.';
+    throw new Error('token no longer works, paste your new token');
+  }
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.error?.message || `HTTP ${res.status}`);
